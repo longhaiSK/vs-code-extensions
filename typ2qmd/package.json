@@ -1,25 +1,49 @@
 {
-  "name": "qmd2typ",
+  "name": "qmd-typ-sync",
   "displayName": "Quarto Typst Sync",
-  "description": "One-click render and reverse-sync for Quarto-Typst workflows.",
+  "description": "One-click render and bidirectional reverse-sync for Quarto-Typst workflows.",
   "version": "0.1.0",
   "main": "./out/extension.js",
   "engines": {
     "vscode": "^1.80.0"
   },
+  "activationEvents": [
+    "onLanguage:quarto",
+    "onLanguage:typst"
+  ],
   "contributes": {
+    "configuration": {
+      "title": "QMD2Typ Settings",
+      "properties": {
+        "qmd2typ.renderOnSave": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically render to Typst whenever the .qmd file is saved."
+        }
+      }
+    },
     "commands": [
       {
         "command": "qmd2typ.preview",
-        "title": "Render Typst",
-        "icon": "$(file-pdf)"
+        "title": "Render & Sync Typst",
+        "icon": "$(eye)"
+      },
+      {
+        "command": "qmd2typ.forwardSync",
+        "title": "Sync PDF to Cursor",
+        "icon": "$(arrow-right)"
       }
     ],
     "menus": {
       "editor/title": [
         {
           "command": "qmd2typ.preview",
-          "group": "navigation",
+          "group": "navigation@1",
+          "when": "editorLangId == quarto"
+        },
+        {
+          "command": "qmd2typ.forwardSync",
+          "group": "navigation@2",
           "when": "editorLangId == quarto"
         }
       ]
