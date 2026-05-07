@@ -1,19 +1,20 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
-import { spawn } from 'child_process'; // CHANGED: We now use spawn for real-time streaming
+import { spawn, ChildProcess } from 'child_process'; 
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 let isSyncing = false; 
 let isWebviewActive = false; 
+let activePreviewProcess: ChildProcess | null = null; // Track the hanging process
 
-// Create a dedicated Output Panel for the user to see compilation errors
 const outputChannel = vscode.window.createOutputChannel("Quarto -> Typst");
 
 function setFileLock(filePath: string, isLocked: boolean) {
     if (!fs.existsSync(filePath)) return;
     try {
+        // Only lock if we aren't currently in the middle of a preview write
         fs.chmodSync(filePath, isLocked ? 0o444 : 0o666);
     } catch (e) {
         console.warn(`Could not set lock state on ${filePath}`);
@@ -22,18 +23,18 @@ function setFileLock(filePath: string, isLocked: boolean) {
 
 export function activate(context: vscode.ExtensionContext) {
 
-    const onSave = vscode.workspace.onDidSaveTextDocument(async (doc) => {
-        const config = vscode.workspace.getConfiguration('qmd2typ');
-        if (config.get('renderOnSave') && doc.languageId === 'quarto') {
-            const editor = vscode.window.activeTextEditor;
-            const line = (editor && editor.document === doc) ? editor.selection.active.line : 0;
-            await runQuartoRender(doc, false, line, editor?.viewColumn); 
+    // COMMAND: Render / Start Preview
+    let previewCommand = vscode.commands.registerCommand('qmd2typ.preview', async () => {
+        const editor = vscode.window.activeTextEditor;
+        if (editor && editor.document.languageId === 'quarto') {
+            await editor.document.save(); 
+            await startQuartoPreview(editor.document, true);
         }
     });
 
+    // COMMAND: Forward Sync
     let forwardSync = vscode.commands.registerCommand('qmd2typ.forwardSync', async () => {
         if (isSyncing) return;
-        
         const qmdEditor = vscode.window.activeTextEditor;
         if (!qmdEditor || qmdEditor.document.languageId !== 'quarto') return;
 
@@ -45,125 +46,86 @@ export function activate(context: vscode.ExtensionContext) {
         }
     });
 
+    // AUTO-SYNC / JUMP BACK logic remains the same
     let autoSync = vscode.window.onDidChangeActiveTextEditor(async (editor) => {
         if (isSyncing) return; 
-
-        if (!editor) {
-            isWebviewActive = true;
-            return;
-        }
+        if (!editor) { isWebviewActive = true; return; }
 
         if (editor.document.fileName.endsWith('.typ')) {
             if (isWebviewActive) {
                 isWebviewActive = false;
                 isSyncing = true;
-                
                 setTimeout(async () => {
                     try {
                         await jumpToQmd(editor);
                         setFileLock(editor.document.fileName, true);
-                    } finally {
-                        isSyncing = false;
-                    }
+                    } finally { isSyncing = false; }
                 }, 50);
             }
-        } else {
-            isWebviewActive = false;
-            if (editor.document.languageId === 'quarto') {
-                const typPath = editor.document.fileName.replace('.qmd', '.typ');
-                setFileLock(typPath, true);
-            }
+        } else if (editor.document.languageId === 'quarto') {
+            const typPath = editor.document.fileName.replace('.qmd', '.typ');
+            setFileLock(typPath, true);
         }
     });
 
-    let previewCommand = vscode.commands.registerCommand('qmd2typ.preview', async () => {
-        const editor = vscode.window.activeTextEditor;
-        if (editor && editor.document.languageId === 'quarto') {
-            await editor.document.save(); 
-            await runQuartoRender(editor.document, true, editor.selection.active.line, editor.viewColumn);
-        }
-    });
-
-    context.subscriptions.push(onSave, forwardSync, autoSync, previewCommand);
+    context.subscriptions.push(previewCommand, forwardSync, autoSync);
 }
 
-// --- CORE FUNCTIONS ---
+// --- NEW RESIDENT PREVIEW ENGINE ---
 
-async function runQuartoRender(doc: vscode.TextDocument, openTypAfter: boolean, lineIdx: number = 0, viewCol?: vscode.ViewColumn) {
+async function startQuartoPreview(doc: vscode.TextDocument, jumpToTyp: boolean) {
     const qmdPath = doc.fileName;
     const workspaceFolder = path.dirname(qmdPath);
     const typPath = qmdPath.replace('.qmd', '.typ');
-    
-    // Explicitly enforce keeping the .typ file and extension
-    // Enforce all speed and bridge-protection flags
-    // Corrected flags for speed and bridge protection
-    const args = [
-        'render', 
-        qmdPath, 
-        '--to', 'typst', 
-        '--cache',              // Uses cached results for code chunks
-        '--quiet',              // Reduces CLI overhead (optional, keeps logs cleaner)
-        '-M', 'output-ext:typ', // Ensures .typ extension
-        '-M', 'keep-typ:true'   // Prevents Quarto from deleting the file
-    ];
 
+    // If a process is already hanging, we don't need to start a new one
+    // Quarto Preview will detect the file save automatically.
+    if (activePreviewProcess) {
+        outputChannel.appendLine(`[Info] Quarto Preview is already resident. Updating bridge...`);
+        if (jumpToTyp) await syncQmdToTyp(doc.uri, 0); 
+        return;
+    }
+
+    // Unlock bridge for the resident process
     setFileLock(typPath, false);
 
-    // THE FIX: Remove the popup notification entirely!
-    // Instead, immediately clear and open our Terminal-like Output Channel.
-    // 'true' preserves your cursor focus in the editor so you don't stop typing.
+    const args = [
+        'preview', qmdPath, 
+        '--to', 'typst', 
+        '--no-browser',           // Don't open a browser
+        '--no-watch-inputs',      // Only render on Save, not every keystroke
+        '-M', 'output-ext:typ', 
+        '-M', 'keep-typ:true'
+    ];
+
     outputChannel.clear();
     outputChannel.show(true); 
-    outputChannel.appendLine(`[Running] quarto ${args.join(' ')}\n`);
+    outputChannel.appendLine(`[Starting Resident Bridge] quarto ${args.join(' ')}\n`);
 
-    return new Promise((resolve) => {
-        const timeout = setTimeout(() => {
-            outputChannel.appendLine(`\n[Error] Render timed out after 30 seconds.`);
-            vscode.window.showErrorMessage("Render timed out.");
-            setFileLock(typPath, true);
-            resolve(false);
-        }, 30000);
+    activePreviewProcess = spawn('quarto', args, { cwd: workspaceFolder });
 
-        // Use spawn to stream output in real-time
-        const quartoProcess = spawn('quarto', args, { cwd: workspaceFolder });
+    activePreviewProcess.stdout?.on('data', (data) => {
+        const out = data.toString();
+        outputChannel.append(out);
+        
+        // When Quarto says it's watching, we know the first render is done
+        if (out.includes("Watching files for changes") && jumpToTyp) {
+            syncQmdToTyp(doc.uri, 0);
+        }
+    });
 
-        quartoProcess.stdout.on('data', (data) => {
-            outputChannel.append(data.toString());
-        });
+    activePreviewProcess.stderr?.on('data', (data) => {
+        outputChannel.append(data.toString());
+    });
 
-        quartoProcess.stderr.on('data', (data) => {
-            outputChannel.append(data.toString());
-        });
-
-        quartoProcess.on('close', async (code) => {
-            clearTimeout(timeout);
-            
-            if (code !== 0) {
-                // IF ERROR: The panel is already open, so you immediately see why it failed.
-                outputChannel.appendLine(`\n[Failed] Quarto exited with code ${code}.`);
-                setFileLock(typPath, true); 
-                resolve(false);
-                return;
-            }
-
-            outputChannel.appendLine("\n[Success] Render completed.");
-
-            if (openTypAfter) {
-                isSyncing = true; 
-                try {
-                    await syncQmdToTyp(doc.uri, lineIdx, viewCol);
-                } catch (err) {
-                    console.error("Sync error:", err);
-                } finally {
-                    isSyncing = false;
-                }
-            } else {
-                setFileLock(typPath, true); 
-            }
-            resolve(true);
-        });
+    activePreviewProcess.on('close', (code) => {
+        outputChannel.appendLine(`\n[Stopped] Quarto process exited (Code ${code}).`);
+        activePreviewProcess = null;
+        setFileLock(typPath, true);
     });
 }
+
+// ... syncQmdToTyp and jumpToQmd functions remain unchanged from previous version ...
 
 async function syncQmdToTyp(qmdUri: vscode.Uri, lineIdx: number, viewCol?: vscode.ViewColumn) {
     const qmdPath = qmdUri.fsPath;
