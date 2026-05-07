@@ -1,60 +1,36 @@
 {
-  "name": "typ2qmd",
-  "displayName": "typ2qmd",
-  "description": "A cursor jumper from Typst file to QMD file",
-  "version": "0.0.1",
-  "engines": {
-    "vscode": "^1.109.0"
-  },
-  "categories": [
-    "Other"
-  ],
-  "activationEvents": [],
+  "name": "qmd2typ",
+  "displayName": "Quarto Typst Sync",
+  "description": "One-click render and reverse-sync for Quarto-Typst workflows.",
+  "version": "0.1.0",
   "main": "./out/extension.js",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
   "contributes": {
-    "configuration": {
-      "title": "typ2qmd Settings",
-      "properties": {
-        "typ2qmd.targetExtensions": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": [".qmd", ".md", ".tex", ".typ"],
-          "description": "The file extensions to search for when jumping, in order of priority."
-        }
-      }
-    },
     "commands": [
       {
-        "command": "typ2qmd.syncLine",
-        "title": "typ2qmd: Jump to Source File"
+        "command": "qmd2typ.preview",
+        "title": "Render Typst",
+        "icon": "$(file-pdf)"
       }
     ],
-    "keybindings": [
-      {
-        "command": "typ2qmd.syncLine",
-        "key": "cmd+shift+j",
-        "when": "editorTextFocus"
-      }
-    ]
+    "menus": {
+      "editor/title": [
+        {
+          "command": "qmd2typ.preview",
+          "group": "navigation",
+          "when": "editorLangId == quarto"
+        }
+      ]
+    }
   },
   "scripts": {
-    "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./",
-    "pretest": "npm run compile && npm run lint",
-    "lint": "eslint src",
-    "test": "vscode-test"
+    "vscode:prepublish": "npm run compile"
   },
   "devDependencies": {
-    "@types/vscode": "^1.109.0",
-    "@types/mocha": "^10.0.10",
-    "@types/node": "22.x",
-    "typescript-eslint": "^8.56.1",
-    "eslint": "^9.39.3",
-    "typescript": "^5.9.3",
-    "@vscode/test-cli": "^0.0.12",
-    "@vscode/test-electron": "^2.5.2"
+    "@types/vscode": "^1.80.0",
+    "typescript": "^5.3.3"
   }
 }

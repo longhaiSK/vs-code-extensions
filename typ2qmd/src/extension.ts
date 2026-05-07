@@ -1,100 +1,110 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
+import { exec } from 'child_process';
 
 export function activate(context: vscode.ExtensionContext) {
-    let disposable = vscode.commands.registerCommand('typ2qmd.syncLine', async () => {
+    
+    // 1. THE "RENDER TYPST" BUTTON
+    let previewCommand = vscode.commands.registerCommand('qmd2typ.preview', async () => {
         const editor = vscode.window.activeTextEditor;
+        if (!editor || !editor.document.fileName.endsWith('.qmd')) return;
+
+        const qmdDoc = editor.document;
+        const qmdPath = qmdDoc.fileName;
+        const typPath = qmdPath.replace('.qmd', '.typ');
+
+        await qmdDoc.save();
+
+        vscode.window.withProgress({
+            location: vscode.ProgressLocation.Notification,
+            title: "Quarto: Generating Typst bridge...",
+            cancellable: false
+        }, (progress) => {
+            return new Promise((resolve) => {
+                // Simplified command execution
+                const cmd = `quarto render "${qmdPath}" --to typst`;
+                
+                exec(cmd, { cwd: path.dirname(qmdPath) }, async (error, stdout, stderr) => {
+                    if (error) {
+                        vscode.window.showErrorMessage(`Quarto Error: ${stderr}`);
+                        resolve(false);
+                        return;
+                    }
+
+                    // Open the .typ file normally so you can see any issues
+                    const typDoc = await vscode.workspace.openTextDocument(vscode.Uri.file(typPath));
+                    await vscode.window.showTextDocument(typDoc, {
+                        viewColumn: vscode.ViewColumn.One,
+                        preview: false
+                    });
+
+                    // Inform the user it's ready for the Tinymist preview
+                    vscode.window.setStatusBarMessage("Typst bridge updated.", 3000);
+                    resolve(true);
+                });
+            });
+        });
+    });
+
+    // 2. THE INVERSE JUMP (Clicking in Preview -> .typ -> .qmd)
+    let autoSync = vscode.window.onDidChangeActiveTextEditor(async (editor) => {
         if (!editor) return;
 
-        const document = editor.document;
-        const currentFilePath = document.fileName;
-        const currentDir = path.dirname(currentFilePath);
-        const currentBaseName = path.basename(currentFilePath, path.extname(currentFilePath));
-
-        // 1. Fetch settings
-        const config = vscode.workspace.getConfiguration('typ2qmd');
-        const targetExtensions = config.get<string[]>('targetExtensions') || [".qmd", ".md", ".tex", ".typ"];
-
-        // 2. Identify the text on the current line
-        const position = editor.selection.active;
-        const lineText = document.lineAt(position.line).text.trim();
-        
-        if (lineText.length === 0) {
-            vscode.window.showWarningMessage('Current line is empty.');
-            return;
+        const doc = editor.document;
+        if (doc.fileName.endsWith('.typ')) {
+            // Tiny delay to let Tinymist finish its cursor placement
+            setTimeout(async () => {
+                await jumpToQmdSource(editor);
+            }, 50);
         }
+    });
 
-        // 3. Find the partner file
-        let targetPath = '';
-        for (const ext of targetExtensions) {
-            if (ext === path.extname(currentFilePath)) continue;
-            const potentialPath = path.join(currentDir, currentBaseName + ext);
-            if (fs.existsSync(potentialPath)) {
-                targetPath = potentialPath;
-                break;
-            }
-        } // end for loop
+    context.subscriptions.push(previewCommand, autoSync);
+}
 
-        if (!targetPath) {
-            vscode.window.showErrorMessage(`No partner file found for ${currentBaseName}`);
-            return;
-        }
+async function jumpToQmdSource(typEditor: vscode.TextEditor) {
+    const typDoc = typEditor.document;
+    const qmdPath = typDoc.fileName.replace('.typ', '.qmd');
+    
+    if (!fs.existsSync(qmdPath)) return;
 
-        try {
-            // 4. Read file and find match
-            const targetContent = fs.readFileSync(targetPath, 'utf-8');
-            const targetLines = targetContent.split(/\r?\n/);
-            const searchWords = new Set(lineText.toLowerCase().match(/\b\w{4,}\b/g) || []);
+    // Grab the line content from the .typ file
+    const lineText = typDoc.lineAt(typEditor.selection.active.line).text.trim();
+    if (lineText.length === 0) return;
+
+    try {
+        const qmdDoc = await vscode.workspace.openTextDocument(vscode.Uri.file(qmdPath));
+        const qmdLines = qmdDoc.getText().split(/\r?\n/);
+
+        // Fuzzy Matching Logic
+        const searchWords = new Set(lineText.toLowerCase().match(/\b\w{4,}\b/g) || []);
+        let bestMatchIndex = -1;
+        let highestScore = 0;
+
+        qmdLines.forEach((line, index) => {
+            const qmdWords = new Set(line.toLowerCase().match(/\b\w{4,}\b/g) || []);
+            let score = 0;
+            searchWords.forEach(w => { if (qmdWords.has(w)) score++; });
             
-            let bestMatchIndex = -1;
-            let highestScore = 0;
-
-            targetLines.forEach((tLine, index) => {
-                const tWords = new Set(tLine.toLowerCase().match(/\b\w{4,}\b/g) || []);
-                let score = 0;
-                searchWords.forEach(word => { if (tWords.has(word)) score++; });
-
-                if (score > highestScore) {
-                    highestScore = score;
-                    bestMatchIndex = index;
-                }
-            }); // end forEach
-
-            // 5. Navigate without opening duplicates
-            if (bestMatchIndex !== -1 && highestScore > 0) {
-                const targetUri = vscode.Uri.file(targetPath);
-                
-                // Check for an already visible editor containing this file
-                let targetEditor = vscode.window.visibleTextEditors.find(
-                    e => e.document.uri.fsPath === targetUri.fsPath
-                );
-
-                if (targetEditor) {
-                    // Switch focus to the existing tab
-                    await vscode.window.showTextDocument(targetEditor.document, targetEditor.viewColumn);
-                } else {
-                    // Open new tab beside the current one
-                    const targetDoc = await vscode.workspace.openTextDocument(targetUri);
-                    targetEditor = await vscode.window.showTextDocument(targetDoc, vscode.ViewColumn.Beside);
-                }
-
-                // Move cursor and center the screen
-                const targetPosition = new vscode.Position(bestMatchIndex, 0);
-                targetEditor.selection = new vscode.Selection(targetPosition, targetPosition);
-                targetEditor.revealRange(
-                    new vscode.Range(targetPosition, targetPosition), 
-                    vscode.TextEditorRevealType.InCenter
-                );
-            } else {
-                vscode.window.showWarningMessage('No confident match found.');
+            if (score > highestScore) {
+                highestScore = score;
+                bestMatchIndex = index;
             }
-        } catch (err) {
-            vscode.window.showErrorMessage(`Error: ${err}`);
+        });
+
+        if (bestMatchIndex !== -1 && highestScore > 0) {
+            // Jump to QMD but KEEP the .typ file open in the background/tab
+            const qmdEditor = await vscode.window.showTextDocument(qmdDoc, {
+                viewColumn: vscode.ViewColumn.One,
+                preserveFocus: false
+            });
+
+            const pos = new vscode.Position(bestMatchIndex, 0);
+            qmdEditor.selection = new vscode.Selection(pos, pos);
+            qmdEditor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
         }
-    }); // end registerCommand
-
-    context.subscriptions.push(disposable);
-} // end activate
-
-export function deactivate() {}
+    } catch (err) {
+        console.error("Inverse sync failed:", err);
+    }
+}
