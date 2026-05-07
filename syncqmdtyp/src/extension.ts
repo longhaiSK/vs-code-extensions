@@ -95,57 +95,72 @@ async function runQuartoRender(doc: vscode.TextDocument, openTypAfter: boolean, 
     const typPath = qmdPath.replace('.qmd', '.typ');
     
     // Explicitly enforce keeping the .typ file and extension
-    const args = ['render', qmdPath, '--to', 'typst', '-M', 'output-ext:typ', '-M', 'keep-typ:true'];
+    // Enforce all speed and bridge-protection flags
+    // Corrected flags for speed and bridge protection
+    const args = [
+        'render', 
+        qmdPath, 
+        '--to', 'typst', 
+        '--cache',              // Uses cached results for code chunks
+        '--quiet',              // Reduces CLI overhead (optional, keeps logs cleaner)
+        '-M', 'output-ext:typ', // Ensures .typ extension
+        '-M', 'keep-typ:true'   // Prevents Quarto from deleting the file
+    ];
 
     setFileLock(typPath, false);
 
-    return vscode.window.withProgress({
-        location: vscode.ProgressLocation.Notification,
-        title: "Quarto: Rendering Typst...",
-        cancellable: false
-    }, () => {
-        return new Promise((resolve) => {
+    // THE FIX: Remove the popup notification entirely!
+    // Instead, immediately clear and open our Terminal-like Output Channel.
+    // 'true' preserves your cursor focus in the editor so you don't stop typing.
+    outputChannel.clear();
+    outputChannel.show(true); 
+    outputChannel.appendLine(`[Running] quarto ${args.join(' ')}\n`);
+
+    return new Promise((resolve) => {
+        const timeout = setTimeout(() => {
+            outputChannel.appendLine(`\n[Error] Render timed out after 30 seconds.`);
+            vscode.window.showErrorMessage("Render timed out.");
+            setFileLock(typPath, true);
+            resolve(false);
+        }, 30000);
+
+        // Use spawn to stream output in real-time
+        const quartoProcess = spawn('quarto', args, { cwd: workspaceFolder });
+
+        quartoProcess.stdout.on('data', (data) => {
+            outputChannel.append(data.toString());
+        });
+
+        quartoProcess.stderr.on('data', (data) => {
+            outputChannel.append(data.toString());
+        });
+
+        quartoProcess.on('close', async (code) => {
+            clearTimeout(timeout);
             
-            outputChannel.clear();
-            outputChannel.appendLine(`[Running] quarto ${args.join(' ')}\n`);
+            if (code !== 0) {
+                // IF ERROR: The panel is already open, so you immediately see why it failed.
+                outputChannel.appendLine(`\n[Failed] Quarto exited with code ${code}.`);
+                setFileLock(typPath, true); 
+                resolve(false);
+                return;
+            }
 
-            // Use spawn to stream output in real-time
-            const quartoProcess = spawn('quarto', args, { cwd: workspaceFolder });
+            outputChannel.appendLine("\n[Success] Render completed.");
 
-            quartoProcess.stdout.on('data', (data) => {
-                outputChannel.append(data.toString());
-            });
-
-            quartoProcess.stderr.on('data', (data) => {
-                outputChannel.append(data.toString());
-            });
-
-            quartoProcess.on('close', async (code) => {
-                if (code !== 0) {
-                    // IF ERROR: Pop open the panel so the user sees exactly what failed!
-                    outputChannel.show(true);
-                    vscode.window.showErrorMessage(`Quarto Render Failed (Code ${code}). Check Output Panel.`);
-                    setFileLock(typPath, true); 
-                    resolve(false);
-                    return;
+            if (openTypAfter) {
+                isSyncing = true; 
+                try {
+                    await syncQmdToTyp(doc.uri, lineIdx, viewCol);
+                } catch (err) {
+                    console.error("Sync error:", err);
+                } finally {
+                    isSyncing = false;
                 }
-
-                outputChannel.appendLine("\n[Success] Render completed.");
-
-                if (openTypAfter) {
-                    isSyncing = true; 
-                    try {
-                        await syncQmdToTyp(doc.uri, lineIdx, viewCol);
-                    } catch (err) {
-                        console.error("Sync error:", err);
-                    } finally {
-                        isSyncing = false;
-                    }
-                } else {
-                    setFileLock(typPath, true); 
-                }
-                resolve(true);
-            });
+            } else {
+                setFileLock(typPath, true); 
+            }
+            resolve(true);
         });
     });
 }
