@@ -2,6 +2,7 @@
   "name": "qmd-typ-sync",
   "displayName": "Quarto Typst Sync",
   "description": "One-click render and bidirectional reverse-sync for Quarto-Typst workflows.",
+  "author": "Prof. Longhai Li",
   "version": "0.1.0",
   "main": "./out/extension.js",
   "engines": {
@@ -25,13 +26,13 @@
     "commands": [
       {
         "command": "qmd2typ.preview",
-        "title": "Render & Sync Typst",
-        "icon": "$(eye)"
+        "title": "Render Typst",
+        "icon": "$(symbol-text)" 
       },
       {
         "command": "qmd2typ.forwardSync",
-        "title": "Sync PDF to Cursor",
-        "icon": "$(arrow-right)"
+        "title": "Forward Sync (Preview)",
+        "icon": "$(eye)"
       }
     ],
     "menus": {
@@ -47,7 +48,21 @@
           "when": "editorLangId == quarto"
         }
       ]
-    }
+    },
+    "keybindings": [
+      {
+        "command": "qmd2typ.preview",
+        "key": "ctrl+shift+t",
+        "mac": "cmd+shift+t",
+        "when": "editorLangId == quarto"
+      },
+      {
+        "command": "qmd2typ.forwardSync",
+        "key": "ctrl+shift+l",
+        "mac": "cmd+shift+l",
+        "when": "editorLangId == quarto"
+      }
+    ]
   },
   "scripts": {
     "compile": "tsc -p ./",

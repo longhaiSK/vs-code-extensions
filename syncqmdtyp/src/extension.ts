@@ -99,7 +99,9 @@ async function runQuartoRender(doc: vscode.TextDocument, openTypAfter: boolean, 
     const qmdPath = doc.fileName;
     const workspaceFolder = path.dirname(qmdPath);
     const typPath = qmdPath.replace('.qmd', '.typ');
-    const cmd = `quarto render "${qmdPath}" --to typst`;
+    
+    // THE FIX: Explicitly tell Quarto to keep the .typ file and set the extension
+    const cmd = `quarto render "${qmdPath}" --to typst -M output-ext:typ -M keep-typ:true`;
 
     // UNLOCK for render
     setFileLock(typPath, false);
