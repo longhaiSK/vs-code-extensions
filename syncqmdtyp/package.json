@@ -3,6 +3,7 @@
   "displayName": "Quarto Typst Sync",
   "description": "One-click render and bidirectional reverse-sync for Quarto-Typst workflows.",
   "author": "Prof. Longhai Li",
+  "publisher": "LonghaiLi",
   "version": "0.1.0",
   "main": "./out/extension.js",
   "engines": {
@@ -27,7 +28,7 @@
       {
         "command": "qmd2typ.preview",
         "title": "Render Typst",
-        "icon": "$(symbol-text)" 
+        "icon": "$(text-size)" 
       },
       {
         "command": "qmd2typ.forwardSync",

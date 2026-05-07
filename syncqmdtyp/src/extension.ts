@@ -1,14 +1,16 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
-import { exec } from 'child_process';
+import { spawn } from 'child_process'; // CHANGED: We now use spawn for real-time streaming
 
-
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 let isSyncing = false; 
-let isWebviewActive = false; // Tracks if you are clicking inside the PDF
+let isWebviewActive = false; 
 
-// --- HELPER: Manage File Lock ---
+// Create a dedicated Output Panel for the user to see compilation errors
+const outputChannel = vscode.window.createOutputChannel("Quarto -> Typst");
+
 function setFileLock(filePath: string, isLocked: boolean) {
     if (!fs.existsSync(filePath)) return;
     try {
@@ -25,7 +27,7 @@ export function activate(context: vscode.ExtensionContext) {
         if (config.get('renderOnSave') && doc.languageId === 'quarto') {
             const editor = vscode.window.activeTextEditor;
             const line = (editor && editor.document === doc) ? editor.selection.active.line : 0;
-            await runQuartoRender(doc, true, line, editor?.viewColumn); 
+            await runQuartoRender(doc, false, line, editor?.viewColumn); 
         }
     });
 
@@ -43,24 +45,19 @@ export function activate(context: vscode.ExtensionContext) {
         }
     });
 
-    // --- THE NEW OBSERVER LOGIC ---
     let autoSync = vscode.window.onDidChangeActiveTextEditor(async (editor) => {
         if (isSyncing) return; 
 
-        // 1. If editor is undefined, you clicked into the PDF Webview!
         if (!editor) {
             isWebviewActive = true;
             return;
         }
 
-        // 2. If you arrive at a .typ file...
         if (editor.document.fileName.endsWith('.typ')) {
-            // ...AND you just came from the PDF Webview
             if (isWebviewActive) {
-                isWebviewActive = false; // Reset flag
+                isWebviewActive = false;
                 isSyncing = true;
                 
-                // Tinymist routed your click! Bounce to QMD and lock the file.
                 setTimeout(async () => {
                     try {
                         await jumpToQmd(editor);
@@ -71,10 +68,7 @@ export function activate(context: vscode.ExtensionContext) {
                 }, 50);
             }
         } else {
-            // 3. If you manually switch to QMD or another tab, reset the webview flag
             isWebviewActive = false;
-            
-            // If you went back to QMD manually, ensure the .typ file is locked behind you
             if (editor.document.languageId === 'quarto') {
                 const typPath = editor.document.fileName.replace('.qmd', '.typ');
                 setFileLock(typPath, true);
@@ -100,10 +94,9 @@ async function runQuartoRender(doc: vscode.TextDocument, openTypAfter: boolean, 
     const workspaceFolder = path.dirname(qmdPath);
     const typPath = qmdPath.replace('.qmd', '.typ');
     
-    // THE FIX: Explicitly tell Quarto to keep the .typ file and set the extension
-    const cmd = `quarto render "${qmdPath}" --to typst -M output-ext:typ -M keep-typ:true`;
+    // Explicitly enforce keeping the .typ file and extension
+    const args = ['render', qmdPath, '--to', 'typst', '-M', 'output-ext:typ', '-M', 'keep-typ:true'];
 
-    // UNLOCK for render
     setFileLock(typPath, false);
 
     return vscode.window.withProgress({
@@ -112,20 +105,32 @@ async function runQuartoRender(doc: vscode.TextDocument, openTypAfter: boolean, 
         cancellable: false
     }, () => {
         return new Promise((resolve) => {
-            const timeout = setTimeout(() => {
-                vscode.window.showErrorMessage("Render timed out.");
-                resolve(false);
-            }, 30000);
+            
+            outputChannel.clear();
+            outputChannel.appendLine(`[Running] quarto ${args.join(' ')}\n`);
 
-            exec(cmd, { cwd: workspaceFolder }, async (error, stdout, stderr) => {
-                clearTimeout(timeout);
-                resolve(true); 
+            // Use spawn to stream output in real-time
+            const quartoProcess = spawn('quarto', args, { cwd: workspaceFolder });
 
-                if (error) {
-                    vscode.window.showErrorMessage(`Quarto Error: ${stderr || error.message}`);
-                    setFileLock(typPath, true); // Lock if failed
+            quartoProcess.stdout.on('data', (data) => {
+                outputChannel.append(data.toString());
+            });
+
+            quartoProcess.stderr.on('data', (data) => {
+                outputChannel.append(data.toString());
+            });
+
+            quartoProcess.on('close', async (code) => {
+                if (code !== 0) {
+                    // IF ERROR: Pop open the panel so the user sees exactly what failed!
+                    outputChannel.show(true);
+                    vscode.window.showErrorMessage(`Quarto Render Failed (Code ${code}). Check Output Panel.`);
+                    setFileLock(typPath, true); 
+                    resolve(false);
                     return;
                 }
+
+                outputChannel.appendLine("\n[Success] Render completed.");
 
                 if (openTypAfter) {
                     isSyncing = true; 
@@ -137,8 +142,9 @@ async function runQuartoRender(doc: vscode.TextDocument, openTypAfter: boolean, 
                         isSyncing = false;
                     }
                 } else {
-                    setFileLock(typPath, true); // Lock if no jump needed
+                    setFileLock(typPath, true); 
                 }
+                resolve(true);
             });
         });
     });
@@ -150,13 +156,11 @@ async function syncQmdToTyp(qmdUri: vscode.Uri, lineIdx: number, viewCol?: vscod
     if (!fs.existsSync(typPath)) return;
 
     try {
-        // 1. UNLOCK so Tinymist can interact with it and you can click the UI
         setFileLock(typPath, false);
 
         const targetColumn = viewCol || vscode.ViewColumn.One;
         const typUri = vscode.Uri.file(typPath);
         
-        // 2. Open .typ file in the same pane and STOP.
         const typDoc = await vscode.workspace.openTextDocument(typUri);
         const typEditor = await vscode.window.showTextDocument(typDoc, { 
             viewColumn: targetColumn, 
@@ -166,7 +170,6 @@ async function syncQmdToTyp(qmdUri: vscode.Uri, lineIdx: number, viewCol?: vscod
         const qmdDoc = await vscode.workspace.openTextDocument(qmdUri);
         const qmdLineText = qmdDoc.lineAt(lineIdx).text.trim();
         
-        // 3. Move Cursor for Sync
         if (qmdLineText.length > 0) {
             const searchWords = new Set(qmdLineText.toLowerCase().match(/\b\w{4,}\b/g) || []);
             if (searchWords.size > 0) {
@@ -188,10 +191,6 @@ async function syncQmdToTyp(qmdUri: vscode.Uri, lineIdx: number, viewCol?: vscod
                 }
             }
         }
-        
-        // DO NOT BOUNCE. You are now safely parked in the .typ file.
-        // You have all the time in the world to click "Preview" or view the sync.
-
     } catch (globalErr) {
         console.error("syncQmdToTyp failed:", globalErr);
     }
@@ -213,7 +212,7 @@ async function jumpToQmd(typEditor: vscode.TextEditor) {
     let highStore = 0;
 
     qmdLines.forEach((line, idx) => {
-        const words = new Set(line.toLowerCase().match(/\b\w{4,}\b/g) || []);
+        const words = new paddingSet(line.toLowerCase().match(/\b\w{4,}\b/g) || []);
         let score = 0;
         searchWords.forEach(w => { if (words.has(w)) score++; });
         if (score > highStore) { highStore = score; bestMatch = idx; }
@@ -230,3 +229,6 @@ async function jumpToQmd(typEditor: vscode.TextEditor) {
     }
 }
 
+class paddingSet extends Set<string> {
+    // Just an alias to maintain your existing fuzzy matching logic perfectly
+}
