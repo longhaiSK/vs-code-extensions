@@ -13,9 +13,9 @@ yes | vsce package --allow-missing-repository
 
 echo "Installing extension to Positron..."
 # Explicitly target the new name to avoid any ambiguity
-qmdtools --install-extension qmd-typ-sync-*.vsix --force
+qmdtools --install-extension *.vsix --force
 
 #echo "Cleanup..."
-#rm qmd-typ-sync-*.vsix
+#rm *.vsix
 
 echo "Done! Please restart or reload Positron."
