@@ -1,20 +1,19 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
-import { spawn, ChildProcess } from 'child_process'; 
+import { spawn } from 'child_process'; 
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 let isSyncing = false; 
 let isWebviewActive = false; 
-let activePreviewProcess: ChildProcess | null = null; // Track the hanging process
 
 const outputChannel = vscode.window.createOutputChannel("Quarto -> Typst");
 
 function setFileLock(filePath: string, isLocked: boolean) {
     if (!fs.existsSync(filePath)) return;
     try {
-        // Only lock if we aren't currently in the middle of a preview write
+        // Only lock if we aren't currently in the middle of a render write
         fs.chmodSync(filePath, isLocked ? 0o444 : 0o666);
     } catch (e) {
         console.warn(`Could not set lock state on ${filePath}`);
@@ -23,12 +22,12 @@ function setFileLock(filePath: string, isLocked: boolean) {
 
 export function activate(context: vscode.ExtensionContext) {
 
-    // COMMAND: Render / Start Preview
+    // COMMAND: Render
     let previewCommand = vscode.commands.registerCommand('qmd2typ.preview', async () => {
         const editor = vscode.window.activeTextEditor;
         if (editor && editor.document.languageId === 'quarto') {
             await editor.document.save(); 
-            await startQuartoPreview(editor.document, true);
+            await startQuartoRender(editor.document, true);
         }
     });
 
@@ -46,7 +45,7 @@ export function activate(context: vscode.ExtensionContext) {
         }
     });
 
-    // AUTO-SYNC / JUMP BACK logic remains the same
+    // AUTO-SYNC / JUMP BACK
     let autoSync = vscode.window.onDidChangeActiveTextEditor(async (editor) => {
         if (isSyncing) return; 
         if (!editor) { isWebviewActive = true; return; }
@@ -71,61 +70,106 @@ export function activate(context: vscode.ExtensionContext) {
     context.subscriptions.push(previewCommand, forwardSync, autoSync);
 }
 
-// --- NEW RESIDENT PREVIEW ENGINE ---
+// --- RENDER ENGINE ---
 
-async function startQuartoPreview(doc: vscode.TextDocument, jumpToTyp: boolean) {
+async function startQuartoRender(doc: vscode.TextDocument, jumpAfter: boolean) {
     const qmdPath = doc.fileName;
     const workspaceFolder = path.dirname(qmdPath);
     const typPath = qmdPath.replace('.qmd', '.typ');
 
-    // If a process is already hanging, we don't need to start a new one
-    // Quarto Preview will detect the file save automatically.
-    if (activePreviewProcess) {
-        outputChannel.appendLine(`[Info] Quarto Preview is already resident. Updating bridge...`);
-        if (jumpToTyp) await syncQmdToTyp(doc.uri, 0); 
-        return;
-    }
-
-    // Unlock bridge for the resident process
+    // Unlock so Quarto can write the bridge file to the physical disk
     setFileLock(typPath, false);
 
     const args = [
-        'preview', qmdPath, 
+        'render', qmdPath, 
         '--to', 'typst', 
-        '--no-browser',           // Don't open a browser
-        '--no-watch-inputs',      // Only render on Save, not every keystroke
+        '--cache', 
         '-M', 'output-ext:typ', 
         '-M', 'keep-typ:true'
     ];
 
     outputChannel.clear();
     outputChannel.show(true); 
-    outputChannel.appendLine(`[Starting Resident Bridge] quarto ${args.join(' ')}\n`);
+    outputChannel.appendLine(`[Updating Bridge] quarto ${args.join(' ')}\n`);
 
-    activePreviewProcess = spawn('quarto', args, { cwd: workspaceFolder });
+    const quartoProcess = spawn('quarto', args, { cwd: workspaceFolder });
 
-    activePreviewProcess.stdout?.on('data', (data) => {
+    // Track errors manually in case Quarto returns code 0 improperly
+    let hasError = false;
+
+    quartoProcess.stdout?.on('data', (data) => {
         const out = data.toString();
         outputChannel.append(out);
-        
-        // When Quarto says it's watching, we know the first render is done
-        if (out.includes("Watching files for changes") && jumpToTyp) {
-            syncQmdToTyp(doc.uri, 0);
+        if (out.includes('Error') || out.includes('Failed') || out.includes('failed')) {
+            hasError = true;
         }
     });
 
-    activePreviewProcess.stderr?.on('data', (data) => {
-        outputChannel.append(data.toString());
+    quartoProcess.stderr?.on('data', (data) => {
+        const err = data.toString();
+        outputChannel.append(err);
+        if (err.includes('Error') || err.includes('Failed') || err.includes('failed')) {
+            hasError = true;
+        }
     });
 
-    activePreviewProcess.on('close', (code) => {
-        outputChannel.appendLine(`\n[Stopped] Quarto process exited (Code ${code}).`);
-        activePreviewProcess = null;
+    quartoProcess.on('close', async (code) => {
+        // Re-lock the file to protect it immediately after writing finishes
         setFileLock(typPath, true);
+
+        // Strictly evaluate both the exit code AND our scraped error flag
+        if (code === 0 && !hasError) {
+            outputChannel.appendLine(`\n[Success] .Typ File is updated on disk.`);
+            outputChannel.appendLine(` Browse and Click the .Typ File to Sync Preview.`);
+            outputChannel.appendLine(` Click Preview to Jump Back to .qmd File.`);
+            
+            if (jumpAfter) {
+                // Briefly unlock for the sync navigation logic to function
+                setFileLock(typPath, false);
+                isSyncing = true;
+                try {
+                    await syncQmdToTyp(doc.uri, 0);
+                } finally {
+                    isSyncing = false;
+                    setFileLock(typPath, true);
+                }
+            }
+        } else {
+            // Give a clean error message if it fails
+            const finalCode = code !== 0 ? code : 'Unknown (Caught by log parser)';
+            outputChannel.appendLine(`\n[Error] Render failed with exit code ${finalCode}. Check output logs above.`);
+        }
     });
 }
 
-// ... syncQmdToTyp and jumpToQmd functions remain unchanged from previous version ...
+// --- HELPER: Find all included .qmd files recursively ---
+function getAllRelatedQmdFiles(mainQmdPath: string): string[] {
+    const files = new Set<string>();
+    files.add(mainQmdPath);
+
+    const queue = [mainQmdPath];
+
+    while (queue.length > 0) {
+        const currentPath = queue.shift()!;
+        if (!fs.existsSync(currentPath)) continue;
+
+        const content = fs.readFileSync(currentPath, 'utf8');
+        const regex = /\{\{<\s*include\s+([^\s>]+)\s*>\}\}/g;
+        let match;
+
+        while ((match = regex.exec(content)) !== null) {
+            const includePath = path.resolve(path.dirname(currentPath), match[1]);
+            if (!files.has(includePath)) {
+                files.add(includePath);
+                queue.push(includePath);
+            }
+        }
+    }
+
+    return Array.from(files);
+}
+
+// --- SYNC & JUMP FUNCTIONS ---
 
 async function syncQmdToTyp(qmdUri: vscode.Uri, lineIdx: number, viewCol?: vscode.ViewColumn) {
     const qmdPath = qmdUri.fsPath;
@@ -175,32 +219,49 @@ async function syncQmdToTyp(qmdUri: vscode.Uri, lineIdx: number, viewCol?: vscod
 
 async function jumpToQmd(typEditor: vscode.TextEditor) {
     const typDoc = typEditor.document;
-    const qmdPath = typDoc.fileName.replace('.typ', '.qmd');
-    if (!fs.existsSync(qmdPath)) return;
+    const mainQmdPath = typDoc.fileName.replace('.typ', '.qmd');
+    if (!fs.existsSync(mainQmdPath)) return;
 
     const lineText = typDoc.lineAt(typEditor.selection.active.line).text.trim();
     if (!lineText) return;
 
-    const qmdDoc = await vscode.workspace.openTextDocument(vscode.Uri.file(qmdPath));
-    const qmdLines = qmdDoc.getText().split(/\r?\n/);
-
     const searchWords = new Set(lineText.toLowerCase().match(/\b\w{4,}\b/g) || []);
-    let bestMatch = -1;
-    let highStore = 0;
+    if (searchWords.size === 0) return;
 
-    qmdLines.forEach((line, idx) => {
-        const words = new paddingSet(line.toLowerCase().match(/\b\w{4,}\b/g) || []);
-        let score = 0;
-        searchWords.forEach(w => { if (words.has(w)) score++; });
-        if (score > highStore) { highStore = score; bestMatch = idx; }
-    });
+    // Utilize the helper to get the main file AND all included chapters
+    const qmdFilesToSearch = getAllRelatedQmdFiles(mainQmdPath);
 
-    if (bestMatch !== -1) {
+    let globalBestFile = '';
+    let globalBestLine = -1;
+    let globalHighScore = 0;
+
+    for (const filePath of qmdFilesToSearch) {
+        if (!fs.existsSync(filePath)) continue;
+
+        const content = fs.readFileSync(filePath, 'utf8');
+        const lines = content.split(/\r?\n/);
+
+        lines.forEach((line, idx) => {
+            const words = new paddingSet(line.toLowerCase().match(/\b\w{4,}\b/g) || []);
+            let score = 0;
+            searchWords.forEach(w => { if (words.has(w)) score++; });
+            
+            if (score > globalHighScore) { 
+                globalHighScore = score; 
+                globalBestLine = idx; 
+                globalBestFile = filePath;
+            }
+        });
+    }
+
+    if (globalBestFile !== '' && globalBestLine !== -1) {
+        const qmdDoc = await vscode.workspace.openTextDocument(vscode.Uri.file(globalBestFile));
         const qmdEditor = await vscode.window.showTextDocument(qmdDoc, { 
             viewColumn: typEditor.viewColumn, 
             preserveFocus: false 
         });
-        const pos = new vscode.Position(bestMatch, 0);
+        
+        const pos = new vscode.Position(globalBestLine, 0);
         qmdEditor.selection = new vscode.Selection(pos, pos);
         qmdEditor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
     }
