@@ -1,5 +1,5 @@
 #!/bin/zsh
-
+source ~/.zshrc
 # 1. Compile the TypeScript
 npm run compile
 
