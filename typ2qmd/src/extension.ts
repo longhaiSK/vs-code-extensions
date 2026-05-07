@@ -3,6 +3,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { exec } from 'child_process';
 
+
+
 let isSyncing = false; 
 let isWebviewActive = false; // Tracks if you are clicking inside the PDF
 
@@ -225,3 +227,4 @@ async function jumpToQmd(typEditor: vscode.TextEditor) {
         qmdEditor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
     }
 }
+
