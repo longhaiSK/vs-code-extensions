@@ -10,10 +10,13 @@ let isWebviewActive = false;
 
 const outputChannel = vscode.window.createOutputChannel("Quarto -> Typst");
 
+/**
+ * Sets file permissions to read-only (444) or read-write (666).
+ * Only executes if the file exists.
+ */
 function setFileLock(filePath: string, isLocked: boolean) {
     if (!fs.existsSync(filePath)) return;
     try {
-        // Only lock if we aren't currently in the middle of a render write
         fs.chmodSync(filePath, isLocked ? 0o444 : 0o666);
     } catch (e) {
         console.warn(`Could not set lock state on ${filePath}`);
@@ -50,20 +53,28 @@ export function activate(context: vscode.ExtensionContext) {
         if (isSyncing) return; 
         if (!editor) { isWebviewActive = true; return; }
 
-        if (editor.document.fileName.endsWith('.typ')) {
-            if (isWebviewActive) {
-                isWebviewActive = false;
-                isSyncing = true;
-                setTimeout(async () => {
-                    try {
-                        await jumpToQmd(editor);
-                        setFileLock(editor.document.fileName, true);
-                    } finally { isSyncing = false; }
-                }, 50);
+        const fileName = editor.document.fileName;
+
+        if (fileName.endsWith('.typ')) {
+            const qmdPath = fileName.replace('.typ', '.qmd');
+            // ONLY lock and jump if this .typ file belongs to a .qmd project
+            if (fs.existsSync(qmdPath)) {
+                if (isWebviewActive) {
+                    isWebviewActive = false;
+                    isSyncing = true;
+                    setTimeout(async () => {
+                        try {
+                            await jumpToQmd(editor);
+                            setFileLock(fileName, true);
+                        } finally { isSyncing = false; }
+                    }, 50);
+                }
             }
         } else if (editor.document.languageId === 'quarto') {
-            const typPath = editor.document.fileName.replace('.qmd', '.typ');
-            setFileLock(typPath, true);
+            const typPath = fileName.replace('.qmd', '.typ');
+            if (fs.existsSync(typPath)) {
+                setFileLock(typPath, true);
+            }
         }
     });
 
@@ -77,7 +88,6 @@ async function startQuartoRender(doc: vscode.TextDocument, jumpAfter: boolean) {
     const workspaceFolder = path.dirname(qmdPath);
     const typPath = qmdPath.replace('.qmd', '.typ');
 
-    // Unlock so Quarto can write the bridge file to the physical disk
     setFileLock(typPath, false);
 
     const args = [
@@ -90,41 +100,43 @@ async function startQuartoRender(doc: vscode.TextDocument, jumpAfter: boolean) {
 
     outputChannel.clear();
     outputChannel.show(true); 
-    outputChannel.appendLine(`[Updating Bridge] quarto ${args.join(' ')}\n`);
+    outputChannel.appendLine(`[Updating Typst File] Rendering ${path.basename(qmdPath)}...\n`);
 
     const quartoProcess = spawn('quarto', args, { cwd: workspaceFolder });
-
-    // Track errors manually in case Quarto returns code 0 improperly
     let hasError = false;
 
-    quartoProcess.stdout?.on('data', (data) => {
-        const out = data.toString();
-        outputChannel.append(out);
-        if (out.includes('Error') || out.includes('Failed') || out.includes('failed')) {
-            hasError = true;
-        }
-    });
+    const filterAndLog = (data: Buffer) => {
+        const lines = data.toString().split(/\r?\n/);
+        lines.forEach(line => {
+            const trimmed = line.trim();
+            if (!trimmed) return;
 
-    quartoProcess.stderr?.on('data', (data) => {
-        const err = data.toString();
-        outputChannel.append(err);
-        if (err.includes('Error') || err.includes('Failed') || err.includes('failed')) {
-            hasError = true;
-        }
-    });
+            const isError = /error|failed|exception/i.test(trimmed);
+            const isWarning = /warning/i.test(trimmed);
+            
+            if (isError || isWarning) {
+                if (isError) hasError = true;
+                outputChannel.appendLine(trimmed);
+            }
+            
+            if (trimmed.startsWith('processing file:') || trimmed.includes('output file:')) {
+                outputChannel.appendLine(trimmed);
+            }
+        });
+    };
+
+    quartoProcess.stdout?.on('data', filterAndLog);
+    quartoProcess.stderr?.on('data', filterAndLog);
 
     quartoProcess.on('close', async (code) => {
-        // Re-lock the file to protect it immediately after writing finishes
         setFileLock(typPath, true);
 
-        // Strictly evaluate both the exit code AND our scraped error flag
         if (code === 0 && !hasError) {
-            outputChannel.appendLine(`\n[Success] .Typ File is updated on disk.`);
-            outputChannel.appendLine(` Browse and Click the .Typ File to Sync Preview.`);
-            outputChannel.appendLine(` Click Preview to Jump Back to .qmd File.`);
+            outputChannel.appendLine(`\n[Success] .typ file updated and locked.`);
+            outputChannel.appendLine(`- Browse/Click .typ to sync preview.`);
+            outputChannel.appendLine(`- Double-click preview to jump to source.`);
             
             if (jumpAfter) {
-                // Briefly unlock for the sync navigation logic to function
                 setFileLock(typPath, false);
                 isSyncing = true;
                 try {
@@ -135,18 +147,17 @@ async function startQuartoRender(doc: vscode.TextDocument, jumpAfter: boolean) {
                 }
             }
         } else {
-            // Give a clean error message if it fails
-            const finalCode = code !== 0 ? code : 'Unknown (Caught by log parser)';
-            outputChannel.appendLine(`\n[Error] Render failed with exit code ${finalCode}. Check output logs above.`);
+            const finalCode = code !== 0 ? code : 'Caught by log parser';
+            outputChannel.appendLine(`\n[Error] Render failed (Exit Code: ${finalCode}). Check logs above.`);
         }
     });
 }
 
 // --- HELPER: Find all included .qmd files recursively ---
+
 function getAllRelatedQmdFiles(mainQmdPath: string): string[] {
     const files = new Set<string>();
     files.add(mainQmdPath);
-
     const queue = [mainQmdPath];
 
     while (queue.length > 0) {
@@ -165,7 +176,6 @@ function getAllRelatedQmdFiles(mainQmdPath: string): string[] {
             }
         }
     }
-
     return Array.from(files);
 }
 
@@ -178,11 +188,8 @@ async function syncQmdToTyp(qmdUri: vscode.Uri, lineIdx: number, viewCol?: vscod
 
     try {
         setFileLock(typPath, false);
-
         const targetColumn = viewCol || vscode.ViewColumn.One;
-        const typUri = vscode.Uri.file(typPath);
-        
-        const typDoc = await vscode.workspace.openTextDocument(typUri);
+        const typDoc = await vscode.workspace.openTextDocument(vscode.Uri.file(typPath));
         const typEditor = await vscode.window.showTextDocument(typDoc, { 
             viewColumn: targetColumn, 
             preserveFocus: false 
@@ -212,9 +219,7 @@ async function syncQmdToTyp(qmdUri: vscode.Uri, lineIdx: number, viewCol?: vscod
                 }
             }
         }
-    } catch (globalErr) {
-        console.error("syncQmdToTyp failed:", globalErr);
-    }
+    } catch (e) { console.error(e); }
 }
 
 async function jumpToQmd(typEditor: vscode.TextEditor) {
@@ -228,24 +233,20 @@ async function jumpToQmd(typEditor: vscode.TextEditor) {
     const searchWords = new Set(lineText.toLowerCase().match(/\b\w{4,}\b/g) || []);
     if (searchWords.size === 0) return;
 
-    // Utilize the helper to get the main file AND all included chapters
     const qmdFilesToSearch = getAllRelatedQmdFiles(mainQmdPath);
-
     let globalBestFile = '';
     let globalBestLine = -1;
     let globalHighScore = 0;
 
     for (const filePath of qmdFilesToSearch) {
         if (!fs.existsSync(filePath)) continue;
-
         const content = fs.readFileSync(filePath, 'utf8');
         const lines = content.split(/\r?\n/);
 
         lines.forEach((line, idx) => {
-            const words = new paddingSet(line.toLowerCase().match(/\b\w{4,}\b/g) || []);
+            const words = new Set(line.toLowerCase().match(/\b\w{4,}\b/g) || []);
             let score = 0;
             searchWords.forEach(w => { if (words.has(w)) score++; });
-            
             if (score > globalHighScore) { 
                 globalHighScore = score; 
                 globalBestLine = idx; 
@@ -255,18 +256,30 @@ async function jumpToQmd(typEditor: vscode.TextEditor) {
     }
 
     if (globalBestFile !== '' && globalBestLine !== -1) {
-        const qmdDoc = await vscode.workspace.openTextDocument(vscode.Uri.file(globalBestFile));
-        const qmdEditor = await vscode.window.showTextDocument(qmdDoc, { 
-            viewColumn: typEditor.viewColumn, 
-            preserveFocus: false 
-        });
+        const targetUri = vscode.Uri.file(globalBestFile);
+        
+        // Find if any existing editor already has this file open to avoid duplicate tabs
+        let targetEditor = vscode.window.visibleTextEditors.find(
+            e => e.document.uri.fsPath === targetUri.fsPath
+        );
+
+        if (targetEditor) {
+            await vscode.window.showTextDocument(targetEditor.document, {
+                viewColumn: targetEditor.viewColumn,
+                preserveFocus: false,
+                preview: false 
+            });
+        } else {
+            const qmdDoc = await vscode.workspace.openTextDocument(targetUri);
+            targetEditor = await vscode.window.showTextDocument(qmdDoc, { 
+                viewColumn: typEditor.viewColumn, 
+                preserveFocus: false,
+                preview: false 
+            });
+        }
         
         const pos = new vscode.Position(globalBestLine, 0);
-        qmdEditor.selection = new vscode.Selection(pos, pos);
-        qmdEditor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
+        targetEditor.selection = new vscode.Selection(pos, pos);
+        targetEditor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
     }
-}
-
-class paddingSet extends Set<string> {
-    // Just an alias to maintain your existing fuzzy matching logic perfectly
 }

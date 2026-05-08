@@ -73,6 +73,8 @@
     "vscode:prepublish": "npm run compile"
   },
   "devDependencies": {
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^25.6.2",
     "@types/vscode": "^1.80.0",
     "typescript": "^5.9.3"
   }
