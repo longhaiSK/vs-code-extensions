@@ -29,8 +29,8 @@
         "command": "qmd2typ.preview",
         "title": "Render Typst",
         "icon": {
-         "light": "./icons/typst.svg",
-         "dark": "./icons/typst.svg"
+          "light": "./icons/typst.svg",
+          "dark": "./icons/typst.svg"
         }
       },
       {
@@ -74,6 +74,6 @@
   },
   "devDependencies": {
     "@types/vscode": "^1.80.0",
-    "typescript": "^5.3.3"
+    "typescript": "^5.9.3"
   }
 }
