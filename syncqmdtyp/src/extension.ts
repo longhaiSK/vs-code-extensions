@@ -277,6 +277,15 @@ async function jumpToQmd(typEditor: vscode.TextEditor) {
     if (globalBestFile !== '' && globalBestLine !== -1) {
         const targetUri = vscode.Uri.file(globalBestFile);
         
+        // Cache the view column before we potentially close the typ editor
+        const targetViewColumn = typEditor.viewColumn || vscode.ViewColumn.One;
+
+        // --- NEW: Close the .typ file immediately to hide it ---
+        if (vscode.window.activeTextEditor && vscode.window.activeTextEditor.document.uri.fsPath === typDoc.uri.fsPath) {
+            await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+        }
+        
+        // Find if any existing editor already has this file open to avoid duplicate tabs
         let targetEditor = vscode.window.visibleTextEditors.find(
             e => e.document.uri.fsPath === targetUri.fsPath
         );
@@ -284,14 +293,14 @@ async function jumpToQmd(typEditor: vscode.TextEditor) {
         if (targetEditor) {
             await vscode.window.showTextDocument(targetEditor.document, {
                 viewColumn: targetEditor.viewColumn,
-                preserveFocus: false,
+                preserveFocus: false, // ensures focus is given back to the qmd file
                 preview: false 
             });
         } else {
             const qmdDoc = await vscode.workspace.openTextDocument(targetUri);
             targetEditor = await vscode.window.showTextDocument(qmdDoc, { 
-                viewColumn: typEditor.viewColumn, 
-                preserveFocus: false,
+                viewColumn: targetViewColumn, 
+                preserveFocus: false, // ensures focus is given back to the qmd file
                 preview: false 
             });
         }
