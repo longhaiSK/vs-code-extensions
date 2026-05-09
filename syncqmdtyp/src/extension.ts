@@ -25,12 +25,27 @@ function setFileLock(filePath: string, isLocked: boolean) {
 
 export function activate(context: vscode.ExtensionContext) {
 
-    // COMMAND: Render
+    // COMMAND: Render (Typsting)
     let previewCommand = vscode.commands.registerCommand('qmd2typ.preview', async () => {
         const editor = vscode.window.activeTextEditor;
         if (editor && editor.document.languageId === 'quarto') {
             await editor.document.save(); 
-            await startQuartoRender(editor.document, true);
+            // Pass 'false' so it doesn't automatically jump to the .typ file after rendering
+            await startQuartoRender(editor.document, false);
+        }
+    });
+
+    // COMMAND: View Typ (Explicitly open the .typ file)
+    let viewTypCommand = vscode.commands.registerCommand('qmd2typ.viewTyp', async () => {
+        const editor = vscode.window.activeTextEditor;
+        if (editor && editor.document.languageId === 'quarto') {
+            const typPath = editor.document.fileName.replace('.qmd', '.typ');
+            if (fs.existsSync(typPath)) {
+                // Ensure the file is unlocked if you intend to read/interact with it
+                setFileLock(typPath, false); 
+                const typDoc = await vscode.workspace.openTextDocument(typPath);
+                await vscode.window.showTextDocument(typDoc, { preserveFocus: false });
+            }
         }
     });
 
@@ -42,7 +57,12 @@ export function activate(context: vscode.ExtensionContext) {
 
         isSyncing = true; 
         try {
-            await syncQmdToTyp(qmdEditor.document.uri, qmdEditor.selection.active.line, qmdEditor.viewColumn);
+            // Target a different view column to prevent overwriting the .qmd tab
+            const targetColumn = qmdEditor.viewColumn === vscode.ViewColumn.One 
+                ? vscode.ViewColumn.Two 
+                : vscode.ViewColumn.One;
+
+            await syncQmdToTyp(qmdEditor.document.uri, qmdEditor.selection.active.line, targetColumn);
         } finally {
             isSyncing = false;
         }
@@ -78,7 +98,7 @@ export function activate(context: vscode.ExtensionContext) {
         }
     });
 
-    context.subscriptions.push(previewCommand, forwardSync, autoSync);
+    context.subscriptions.push(previewCommand, viewTypCommand, forwardSync, autoSync);
 }
 
 // --- RENDER ENGINE ---
@@ -133,14 +153,13 @@ async function startQuartoRender(doc: vscode.TextDocument, jumpAfter: boolean) {
 
         if (code === 0 && !hasError) {
             outputChannel.appendLine(`\n[Success] .typ file updated and locked.`);
-            outputChannel.appendLine(`- Browse/Click .typ to sync preview.`);
-            outputChannel.appendLine(`- Double-click preview to jump to source.`);
             
+            // Jump execution handles explicit automatic forward syncs if requested
             if (jumpAfter) {
                 setFileLock(typPath, false);
                 isSyncing = true;
                 try {
-                    await syncQmdToTyp(doc.uri, 0);
+                    await syncQmdToTyp(doc.uri, 0, vscode.ViewColumn.Beside);
                 } finally {
                     isSyncing = false;
                     setFileLock(typPath, true);
@@ -152,8 +171,6 @@ async function startQuartoRender(doc: vscode.TextDocument, jumpAfter: boolean) {
         }
     });
 }
-
-// --- HELPER: Find all included .qmd files recursively ---
 
 function getAllRelatedQmdFiles(mainQmdPath: string): string[] {
     const files = new Set<string>();
@@ -188,11 +205,13 @@ async function syncQmdToTyp(qmdUri: vscode.Uri, lineIdx: number, viewCol?: vscod
 
     try {
         setFileLock(typPath, false);
-        const targetColumn = viewCol || vscode.ViewColumn.One;
+        const targetColumn = viewCol || vscode.ViewColumn.Beside;
         const typDoc = await vscode.workspace.openTextDocument(vscode.Uri.file(typPath));
+        
+        // Use preserveFocus: true so the cursor/focus remains on the .qmd file
         const typEditor = await vscode.window.showTextDocument(typDoc, { 
             viewColumn: targetColumn, 
-            preserveFocus: false 
+            preserveFocus: true 
         });
 
         const qmdDoc = await vscode.workspace.openTextDocument(qmdUri);
@@ -258,7 +277,6 @@ async function jumpToQmd(typEditor: vscode.TextEditor) {
     if (globalBestFile !== '' && globalBestLine !== -1) {
         const targetUri = vscode.Uri.file(globalBestFile);
         
-        // Find if any existing editor already has this file open to avoid duplicate tabs
         let targetEditor = vscode.window.visibleTextEditors.find(
             e => e.document.uri.fsPath === targetUri.fsPath
         );

@@ -6,7 +6,7 @@ expand_aliases=1
 
 # Define the Extension ID (publisher.name)
 # This MUST match your package.json precisely
-EXT_ID="Prof-LonghaiLi.qmd-typ-sync"
+EXT_ID="Prof-LonghaiLi.qmd2typ-pro"
 
 echo "Cleaning up local workspace..."
 rm -f *.vsix
