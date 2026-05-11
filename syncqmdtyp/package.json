@@ -1,10 +1,14 @@
 {
   "name": "qmd2typ-pro",
-  "description": "One-click render and bidirectional reverse-sync for Quarto-Typst workflows.",
+  "description": "One-click render and invserse-search for Quarto-Typst workflows.",
   "author": "Longhai Li",
   "publisher": "Prof-LonghaiLi",
-  "displayName": "Quarto to Typst Workflow",
-  "version": "2.0.0",
+  "extensionDependencies": [
+    "quarto.quarto",
+    "myriad-dreamin.tinymist"
+  ],
+  "displayName": "Quarto-Tinymist Bidirectional Search",
+  "version": "2.0.1",
   "engines": {
     "vscode": "^1.80.0"
   },

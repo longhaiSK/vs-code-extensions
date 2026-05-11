@@ -129,44 +129,49 @@ async function startQuartoRender(doc: vscode.TextDocument, jumpAfter: boolean) {
     quartoProcess.stderr?.on('data', (data) => processOutput(data, true));
 
     quartoProcess.on('close', async (code) => {
-        if (code === 0 && !hasError) {
-            outputChannel.appendLine(`\n[Success] .typ file updated.`);
-            outputChannel.appendLine(`- Browse/Click .typ to sync preview.`);
-            outputChannel.appendLine(`- Double-click preview to jump to source.`);
+    if (code === 0 && !hasError) {
+        outputChannel.appendLine(`\n[Success] .typ file updated.`);
+        
+        try {
+            const typUri = vscode.Uri.file(typPath);
+            const typDoc = await vscode.workspace.openTextDocument(typUri);
             
+            // 1. Show the document (or ensure it's loaded)
+            const typEditor = await vscode.window.showTextDocument(typDoc, { preserveFocus: true, preview: false });
+
+            // 2. FORCE REFRESH FROM DISK
+            // This command clears the "newer file exists" conflict by reloading from disk
+            await vscode.commands.executeCommand('workbench.action.files.revert', typUri);
+
+            // 3. Trigger Tinymist refresh (The "Fake Edit")
+            // We do this AFTER the revert to ensure Tinymist sees the fresh Quarto output
+            const edit = new vscode.WorkspaceEdit();
+            const lastLine = typDoc.lineCount - 1;
+            const position = typDoc.lineAt(lastLine).range.end;
+            
+            edit.insert(typUri, position, ' ');
+            await vscode.workspace.applyEdit(edit);
+            
+            const editUndo = new vscode.WorkspaceEdit();
+            editUndo.delete(typUri, new vscode.Range(position, position.translate(0, 1)));
+            await vscode.workspace.applyEdit(editUndo);
+            
+            // Save immediately so the file is no longer "dirty"
+            await typDoc.save(); 
+
+        } catch (e) {
+            console.warn("Could not refresh .typ file:", e);
+        }
+
+        if (jumpAfter) {
+            isSyncing = true;
             try {
-                const typUri = vscode.Uri.file(typPath);
-                const typDoc = await vscode.workspace.openTextDocument(typUri);
-                
-                // Keep the document open in the background without stealing focus
-                await vscode.window.showTextDocument(typDoc, { preserveFocus: true, preview: false });
-                
-                // Fake edit: Add a space and delete it to force the LSP to refresh the preview
-                const edit = new vscode.WorkspaceEdit();
-                const position = typDoc.lineAt(typDoc.lineCount - 1).range.end;
-                
-                edit.insert(typUri, position, ' ');
-                await vscode.workspace.applyEdit(edit);
-                
-                const editUndo = new vscode.WorkspaceEdit();
-                editUndo.delete(typUri, new vscode.Range(position, position.translate(0, 1)));
-                await vscode.workspace.applyEdit(editUndo);
-                
-                await typDoc.save(); 
-
-            } catch (e) {
-                console.warn("Could not execute Tinymist background update:", e);
+                await syncQmdToTyp(doc.uri, 0, vscode.window.activeTextEditor?.viewColumn);
+            } finally {
+                isSyncing = false;
             }
-
-            if (jumpAfter) {
-                isSyncing = true;
-                try {
-                    await syncQmdToTyp(doc.uri, 0, vscode.window.activeTextEditor?.viewColumn);
-                } finally {
-                    isSyncing = false;
-                }
-            }
-        } else {
+        }
+    } else {
             const finalCode = code !== 0 ? code : 'Caught by log parser';
             outputChannel.appendLine(`\n[Error] Render failed (Exit Code: ${finalCode}). Check the detailed trace above.`);
         }
