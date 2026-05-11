@@ -1,5 +1,8 @@
 {
   "name": "qmd2typ-pro",
+  "description": "One-click render and bidirectional reverse-sync for Quarto-Typst workflows.",
+  "author": "Longhai Li",
+  "publisher": "Prof-LonghaiLi",
   "displayName": "Quarto to Typst Workflow",
   "version": "1.0.0",
   "engines": {
