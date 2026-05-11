@@ -4,7 +4,7 @@
   "author": "Longhai Li",
   "publisher": "Prof-LonghaiLi",
   "displayName": "Quarto to Typst Workflow",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "engines": {
     "vscode": "^1.80.0"
   },
@@ -26,19 +26,15 @@
     "@typescript-eslint/eslint-plugin": "^5.59.7"
   },
   "activationEvents": [
-    "onLanguage:quarto"
+    "onLanguage:quarto",
+    "onLanguage:typst"
   ],
   "contributes": {
     "commands": [
       {
         "command": "qmd2typ.preview",
-        "title": "Render to Typst",
+        "title": "Render Quarto to Typst",
         "icon": "$(play)"
-      },
-      {
-        "command": "qmd2typ.viewTyp",
-        "title": "View Typst Document",
-        "icon": "$(eye)"
       },
       {
         "command": "qmd2typ.forwardSync",
@@ -48,22 +44,22 @@
     ],
     "keybindings": [
       {
-        "command": "qmd2typ.viewTyp",
-        "key": "cmd+shift+v",
-        "mac": "cmd+shift+v",
+        "command": "qmd2typ.preview",
+        "key": "shift+cmd+v",
+        "mac": "shift+cmd+v",
         "when": "editorLangId == quarto"
       },
       {
         "command": "qmd2typ.forwardSync",
-        "key": "cmd+shift+f",
-        "mac": "cmd+shift+f",
+        "key": "shift+cmd+f",
+        "mac": "shift+cmd+f",
         "when": "editorLangId == quarto"
       }
     ],
     "menus": {
       "editor/title": [
         {
-          "command": "qmd2typ.viewTyp",
+          "command": "qmd2typ.preview",
           "when": "editorLangId == quarto",
           "group": "navigation@1"
         },
@@ -75,5 +71,4 @@
       ]
     }
   }
-
 }
