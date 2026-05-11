@@ -10,19 +10,6 @@ let isWebviewActive = false;
 
 const outputChannel = vscode.window.createOutputChannel("Quarto -> Typst");
 
-/**
- * Sets file permissions to read-only (444) or read-write (666).
- * Only executes if the file exists.
- */
-function setFileLock(filePath: string, isLocked: boolean) {
-    if (!fs.existsSync(filePath)) return;
-    try {
-        fs.chmodSync(filePath, isLocked ? 0o444 : 0o666);
-    } catch (e) {
-        console.warn(`Could not set lock state on ${filePath}`);
-    }
-}
-
 export function activate(context: vscode.ExtensionContext) {
 
     // COMMAND: Render
@@ -48,7 +35,7 @@ export function activate(context: vscode.ExtensionContext) {
         }
     });
 
-    // AUTO-SYNC / JUMP BACK & LOCK MANAGER
+    // AUTO-SYNC / JUMP BACK
     let autoSync = vscode.window.onDidChangeActiveTextEditor(async (editor) => {
         if (isSyncing) return; 
         
@@ -62,7 +49,7 @@ export function activate(context: vscode.ExtensionContext) {
 
         if (fileName.endsWith('.typ')) {
             const qmdPath = fileName.replace('.typ', '.qmd');
-            // ONLY lock and jump if this .typ file belongs to a .qmd project
+            // ONLY jump if this .typ file belongs to a .qmd project
             if (fs.existsSync(qmdPath)) {
                 if (isWebviewActive) {
                     isWebviewActive = false;
@@ -70,16 +57,9 @@ export function activate(context: vscode.ExtensionContext) {
                     setTimeout(async () => {
                         try {
                             await jumpToQmd(editor);
-                            setFileLock(fileName, true);
                         } finally { isSyncing = false; }
                     }, 50);
                 }
-            }
-        } else if (editor.document.languageId === 'quarto') {
-            // When user clicks back to the .qmd file, lock the .typ file safely
-            const typPath = fileName.replace('.qmd', '.typ');
-            if (fs.existsSync(typPath)) {
-                setFileLock(typPath, true);
             }
         }
     });
@@ -94,8 +74,6 @@ async function startQuartoRender(doc: vscode.TextDocument, jumpAfter: boolean) {
     const workspaceFolder = path.dirname(qmdPath);
     const typPath = qmdPath.replace('.qmd', '.typ');
 
-    setFileLock(typPath, false);
-
     const args = [
         'render', qmdPath, 
         '--to', 'typst', 
@@ -109,30 +87,46 @@ async function startQuartoRender(doc: vscode.TextDocument, jumpAfter: boolean) {
     outputChannel.appendLine(`[Updating Typst File] Rendering ${path.basename(qmdPath)}...\n`);
 
     const quartoProcess = spawn('quarto', args, { cwd: workspaceFolder });
+    
     let hasError = false;
+    let isCapturingErrorBlock = false;
 
-    const filterAndLog = (data: Buffer) => {
-        const lines = data.toString().split(/\r?\n/);
+    // Enhanced Multiline Error Capture
+    const processOutput = (data: Buffer, isStderr: boolean) => {
+        const text = data.toString();
+        const lines = text.split(/\r?\n/);
+        
         lines.forEach(line => {
             const trimmed = line.trim();
-            if (!trimmed) return;
+            
+            // Preserve empty lines if we are inside an error block
+            if (!trimmed) {
+                if (isCapturingErrorBlock) outputChannel.appendLine(""); 
+                return;
+            }
 
             const isError = /error|failed|exception/i.test(trimmed);
             const isWarning = /warning/i.test(trimmed);
             
             if (isError || isWarning) {
                 if (isError) hasError = true;
+                isCapturingErrorBlock = true; // Begin capturing the multiline stack trace
+                // Print the raw line (not trimmed) to keep indentation for visual code pointers
+                outputChannel.appendLine(line); 
+            } 
+            else if (trimmed.startsWith('processing file:') || trimmed.includes('output file:')) {
+                isCapturingErrorBlock = false; // Reset error block when normal progress resumes
                 outputChannel.appendLine(trimmed);
-            }
-            
-            if (trimmed.startsWith('processing file:') || trimmed.includes('output file:')) {
-                outputChannel.appendLine(trimmed);
+            } 
+            else if (isCapturingErrorBlock || isStderr) {
+                // If we are tracing an error, OR if Quarto pushed this to standard error, print it
+                outputChannel.appendLine(line); 
             }
         });
     };
 
-    quartoProcess.stdout?.on('data', filterAndLog);
-    quartoProcess.stderr?.on('data', filterAndLog);
+    quartoProcess.stdout?.on('data', (data) => processOutput(data, false));
+    quartoProcess.stderr?.on('data', (data) => processOutput(data, true));
 
     quartoProcess.on('close', async (code) => {
         if (code === 0 && !hasError) {
@@ -141,8 +135,6 @@ async function startQuartoRender(doc: vscode.TextDocument, jumpAfter: boolean) {
             outputChannel.appendLine(`- Double-click preview to jump to source.`);
             
             try {
-                // Ensure the file is unlocked so VS Code and Tinymist can interact with it
-                setFileLock(typPath, false); 
                 const typUri = vscode.Uri.file(typPath);
                 const typDoc = await vscode.workspace.openTextDocument(typUri);
                 
@@ -161,10 +153,6 @@ async function startQuartoRender(doc: vscode.TextDocument, jumpAfter: boolean) {
                 await vscode.workspace.applyEdit(editUndo);
                 
                 await typDoc.save(); 
-                
-                // NOTICE: We are intentionally NOT locking the file here. 
-                // It stays unlocked to feed Tinymist, and will be locked automatically 
-                // by autoSync when the user refocuses the .qmd file or clicks the preview.
 
             } catch (e) {
                 console.warn("Could not execute Tinymist background update:", e);
@@ -179,10 +167,8 @@ async function startQuartoRender(doc: vscode.TextDocument, jumpAfter: boolean) {
                 }
             }
         } else {
-            // Lock immediately on error to prevent broken states
-            setFileLock(typPath, true);
             const finalCode = code !== 0 ? code : 'Caught by log parser';
-            outputChannel.appendLine(`\n[Error] Render failed (Exit Code: ${finalCode}). Check logs above.`);
+            outputChannel.appendLine(`\n[Error] Render failed (Exit Code: ${finalCode}). Check the detailed trace above.`);
         }
     });
 }
@@ -221,7 +207,6 @@ async function syncQmdToTyp(qmdUri: vscode.Uri, lineIdx: number, viewCol?: vscod
     if (!fs.existsSync(typPath)) return;
 
     try {
-        setFileLock(typPath, false);
         const targetColumn = viewCol || vscode.ViewColumn.One;
         const typDoc = await vscode.workspace.openTextDocument(vscode.Uri.file(typPath));
         const typEditor = await vscode.window.showTextDocument(typDoc, { 
