@@ -246,11 +246,21 @@ async function jumpToQmd(typEditor: vscode.TextEditor) {
     const mainQmdPath = typDoc.fileName.replace('.typ', '.qmd');
     if (!fs.existsSync(mainQmdPath)) return;
 
-    const lineText = typDoc.lineAt(typEditor.selection.active.line).text.trim();
-    if (!lineText) return;
+    // --- UPGRADED CONTEXT SELECTION ---
+    // Grab roughly 10 words around the cursor for a unique "fingerprint"
+    const cursorOffset = typDoc.offsetAt(typEditor.selection.active);
+    const textAround = typDoc.getText(new vscode.Range(
+        typDoc.positionAt(Math.max(0, cursorOffset - 100)),
+        typDoc.positionAt(cursorOffset + 100)
+    ));
 
-    const searchWords = new Set(lineText.toLowerCase().match(/\b\w{4,}\b/g) || []);
-    if (searchWords.size === 0) return;
+    const words = textAround.match(/\b\w{3,}\b/g) || [];
+    if (words.length === 0) return;
+
+    // Pivot around the cursor: find the 10 words closest to the middle of our sample
+    const midIndex = Math.floor(words.length / 2);
+    const searchWords = words.slice(Math.max(0, midIndex - 5), midIndex + 5)
+                             .map(w => w.toLowerCase());
 
     const qmdFilesToSearch = getAllRelatedQmdFiles(mainQmdPath);
     let globalBestFile = '';
@@ -263,9 +273,16 @@ async function jumpToQmd(typEditor: vscode.TextEditor) {
         const lines = content.split(/\r?\n/);
 
         lines.forEach((line, idx) => {
-            const words = new Set(line.toLowerCase().match(/\b\w{4,}\b/g) || []);
+            if (line.trim().length < 3) return; // Skip empty/trivial lines
+            
+            const lineLower = line.toLowerCase();
             let score = 0;
-            searchWords.forEach(w => { if (words.has(w)) score++; });
+            
+            // Score based on word frequency in this line
+            searchWords.forEach(word => {
+                if (lineLower.includes(word)) score++;
+            });
+
             if (score > globalHighScore) { 
                 globalHighScore = score; 
                 globalBestLine = idx; 
@@ -274,10 +291,10 @@ async function jumpToQmd(typEditor: vscode.TextEditor) {
         });
     }
 
-    if (globalBestFile !== '' && globalBestLine !== -1) {
+    // --- NAVIGATION ---
+    if (globalBestFile !== '' && globalHighScore > 1) { // Require at least 2 word match
         const targetUri = vscode.Uri.file(globalBestFile);
         
-        // Find if any existing editor already has this file open to avoid duplicate tabs
         let targetEditor = vscode.window.visibleTextEditors.find(
             e => e.document.uri.fsPath === targetUri.fsPath
         );
@@ -291,7 +308,7 @@ async function jumpToQmd(typEditor: vscode.TextEditor) {
         } else {
             const qmdDoc = await vscode.workspace.openTextDocument(targetUri);
             targetEditor = await vscode.window.showTextDocument(qmdDoc, { 
-                viewColumn: typEditor.viewColumn, 
+                viewColumn: vscode.ViewColumn.One, 
                 preserveFocus: false,
                 preview: false 
             });
@@ -300,5 +317,13 @@ async function jumpToQmd(typEditor: vscode.TextEditor) {
         const pos = new vscode.Position(globalBestLine, 0);
         targetEditor.selection = new vscode.Selection(pos, pos);
         targetEditor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
+        
+        // Brief highlight effect to show the user where they landed
+        const decoration = vscode.window.createTextEditorDecorationType({
+            backgroundColor: 'rgba(255, 255, 0, 0.3)',
+            isWholeLine: true
+        });
+        targetEditor.setDecorations(decoration, [new vscode.Range(pos, pos)]);
+        setTimeout(() => decoration.dispose(), 800);
     }
 }
