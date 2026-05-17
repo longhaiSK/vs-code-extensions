@@ -1,6 +1,6 @@
 #!/bin/zsh
 # Ensure the alias works within the script
-alias qmdtools='$HOME/Applications/Positron.app/Contents/Resources/app/bin/code'
+alias qmdtools=$workide
 setopt aliases
 expand_aliases=1
 
