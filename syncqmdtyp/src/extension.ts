@@ -256,19 +256,27 @@ async function jumpToQmd(typEditor: vscode.TextEditor) {
     const wordRange = typDoc.getWordRangeAtPosition(cursorPosition);
     const anchorWord = wordRange ? typDoc.getText(wordRange) : "";
 
-    // 2. Get the 10-word context for unique line identification
+    // 2. Get context for both exact matching and tie-breaking
     const cursorOffset = typDoc.offsetAt(cursorPosition);
+    
+    // Grab a larger chunk of text (about 300 chars either way)
     const textAround = typDoc.getText(new vscode.Range(
-        typDoc.positionAt(Math.max(0, cursorOffset - 150)),
-        typDoc.positionAt(cursorOffset + 150)
+        typDoc.positionAt(Math.max(0, cursorOffset - 300)),
+        typDoc.positionAt(cursorOffset + 300)
     ));
 
-    const words = textAround.match(/\b\w{3,}\b/g) || [];
-    if (words.length === 0) return;
+    const allWords = textAround.match(/\b\w{3,}\b/g) || [];
+    if (allWords.length === 0) return;
 
-    const midIndex = Math.floor(words.length / 2);
-    const searchWords = words.slice(Math.max(0, midIndex - 5), midIndex + 5)
-                             .map(w => w.toLowerCase());
+    const midIndex = Math.floor(allWords.length / 2);
+    
+    // Primary Zone: ~12 words right around the cursor for the exact line match
+    const searchWords = allWords.slice(Math.max(0, midIndex - 6), midIndex + 6)
+                                .map(w => w.toLowerCase());
+                                
+    // Context Zone: ~30 words total to act as our tie-breaker
+    const contextWords = allWords.slice(Math.max(0, midIndex - 15), midIndex + 15)
+                                 .map(w => w.toLowerCase());
 
     const qmdFilesToSearch = getAllRelatedQmdFiles(mainQmdPath);
     let globalBestFile = '';
@@ -285,10 +293,31 @@ async function jumpToQmd(typEditor: vscode.TextEditor) {
             
             const lineLower = line.toLowerCase();
             let score = 0;
+            
+            // --- Phase 1: Primary Exact Match ---
             searchWords.forEach(word => {
-                if (lineLower.includes(word)) score++;
+                if (lineLower.includes(word)) score += 1;
             });
 
+            // --- Phase 2: Contextual Tie-Breaker ---
+            if (score > (searchWords.length * 0.4)) { 
+                let surroundingQmd = "";
+                for (let offset = -2; offset <= 2; offset++) {
+                    const targetIdx = idx + offset;
+                    if (offset !== 0 && targetIdx >= 0 && targetIdx < lines.length) {
+                        surroundingQmd += lines[targetIdx] + " ";
+                    }
+                }
+                const surroundingLower = surroundingQmd.toLowerCase();
+
+                contextWords.forEach(word => {
+                    if (!searchWords.includes(word) && surroundingLower.includes(word)) {
+                        score += 0.2; 
+                    }
+                });
+            }
+
+            // Update the global high score
             if (score > globalHighScore) { 
                 globalHighScore = score; 
                 globalBestLine = idx; 
@@ -314,25 +343,30 @@ async function jumpToQmd(typEditor: vscode.TextEditor) {
 
         // Calculate the best column position
         const targetLineText = qmdDoc.lineAt(globalBestLine).text;
-        let targetCol = 0;
+        let startCol = 0;
+        let endCol = 0;
 
         if (anchorWord) {
             // Try to find the exact word within the matched line
             const wordIdx = targetLineText.toLowerCase().indexOf(anchorWord.toLowerCase());
             if (wordIdx !== -1) {
-                targetCol = wordIdx;
+                startCol = wordIdx;
+                // Calculate the exact character index right after the word
+                endCol = wordIdx + anchorWord.length; 
             }
         }
 
-        // ... (previous logic to find globalBestLine and targetCol)
-
-        const pos = new vscode.Position(globalBestLine, targetCol);
-        const anchorRange = qmdDoc.getWordRangeAtPosition(pos) || new vscode.Range(pos, pos.translate(0, 5));
+        const startPos = new vscode.Position(globalBestLine, startCol);
+        const cursorPos = new vscode.Position(globalBestLine, endCol > 0 ? endCol : startCol);
         
-        // Move selection to the exact word
-        targetEditor.selection = new vscode.Selection(pos, pos);
+        // Define the range for the red visual pulse (highlights the whole word)
+        const anchorRange = qmdDoc.getWordRangeAtPosition(startPos) || 
+                            new vscode.Range(startPos, new vscode.Position(globalBestLine, startCol + Math.max(1, anchorWord.length)));
+        
+        // Move selection (cursor) to the EXACT END of the word
+        targetEditor.selection = new vscode.Selection(cursorPos, cursorPos);
         targetEditor.revealRange(
-            new vscode.Range(pos, pos), 
+            new vscode.Range(cursorPos, cursorPos), 
             vscode.TextEditorRevealType.InCenter
         );
         
@@ -349,8 +383,258 @@ async function jumpToQmd(typEditor: vscode.TextEditor) {
         // Apply decoration to the specific word/range
         targetEditor.setDecorations(cursorDecoration, [anchorRange]);
 
-        // Remove the highlight after 1.2 seconds so it doesn't stay red forever
+        // Remove the highlight after 1.2 seconds
         setTimeout(() => cursorDecoration.dispose(), 1200);
     }
 }
+
+// async function jumpToQmd(typEditor: vscode.TextEditor) {
+//     const typDoc = typEditor.document;
+//     const mainQmdPath = typDoc.fileName.replace('.typ', '.qmd');
+//     if (!fs.existsSync(mainQmdPath)) return;
+
+//     // 1. Get the specific word under the cursor to use as the "exact anchor"
+//     const cursorPosition = typEditor.selection.active;
+//     const wordRange = typDoc.getWordRangeAtPosition(cursorPosition);
+//     const anchorWord = wordRange ? typDoc.getText(wordRange) : "";
+
+//     // 2. Get context for both exact matching and tie-breaking
+//     const cursorOffset = typDoc.offsetAt(cursorPosition);
+    
+//     // Grab a larger chunk of text (about 300 chars either way)
+//     const textAround = typDoc.getText(new vscode.Range(
+//         typDoc.positionAt(Math.max(0, cursorOffset - 300)),
+//         typDoc.positionAt(cursorOffset + 300)
+//     ));
+
+//     const allWords = textAround.match(/\b\w{3,}\b/g) || [];
+//     if (allWords.length === 0) return;
+
+//     const midIndex = Math.floor(allWords.length / 2);
+    
+//     // Primary Zone: ~12 words right around the cursor for the exact line match
+//     const searchWords = allWords.slice(Math.max(0, midIndex - 6), midIndex + 6)
+//                                 .map(w => w.toLowerCase());
+                                
+//     // Context Zone: ~30 words total to act as our tie-breaker
+//     const contextWords = allWords.slice(Math.max(0, midIndex - 15), midIndex + 15)
+//                                  .map(w => w.toLowerCase());
+
+//     const qmdFilesToSearch = getAllRelatedQmdFiles(mainQmdPath);
+//     let globalBestFile = '';
+//     let globalBestLine = -1;
+//     let globalHighScore = 0;
+
+//     for (const filePath of qmdFilesToSearch) {
+//         if (!fs.existsSync(filePath)) continue;
+//         const content = fs.readFileSync(filePath, 'utf8');
+//         const lines = content.split(/\r?\n/);
+
+//         lines.forEach((line, idx) => {
+//             if (line.trim().length < 3) return;
+            
+//             const lineLower = line.toLowerCase();
+//             let score = 0;
+            
+//             // --- Phase 1: Primary Exact Match ---
+//             // 1 full point for every exact word matched on this specific line
+//             searchWords.forEach(word => {
+//                 if (lineLower.includes(word)) score += 1;
+//             });
+
+//             // --- Phase 2: Contextual Tie-Breaker ---
+//             // If the base score implies a decent match (e.g., >40% of words found), 
+//             // we check the surrounding lines to break potential duplicates
+//             if (score > (searchWords.length * 0.4)) { 
+                
+//                 // Peek at up to 2 lines above and 2 lines below in the .qmd file
+//                 let surroundingQmd = "";
+//                 for (let offset = -2; offset <= 2; offset++) {
+//                     const targetIdx = idx + offset;
+//                     if (offset !== 0 && targetIdx >= 0 && targetIdx < lines.length) {
+//                         surroundingQmd += lines[targetIdx] + " ";
+//                     }
+//                 }
+//                 const surroundingLower = surroundingQmd.toLowerCase();
+
+//                 // Award fractional bonus points for broader context matches
+//                 contextWords.forEach(word => {
+//                     // Only score context words that weren't already part of the primary search
+//                     if (!searchWords.includes(word) && surroundingLower.includes(word)) {
+//                         score += 0.2; 
+//                     }
+//                 });
+//             }
+
+//             // Update the global high score
+//             if (score > globalHighScore) { 
+//                 globalHighScore = score; 
+//                 globalBestLine = idx; 
+//                 globalBestFile = filePath;
+//             }
+//         });
+//     }
+
+//     // 3. Navigation with Column Precision
+//     if (globalBestFile !== '' && globalHighScore > 1) {
+//         const targetUri = vscode.Uri.file(globalBestFile);
+//         const qmdDoc = await vscode.workspace.openTextDocument(targetUri);
+        
+//         let targetEditor = vscode.window.visibleTextEditors.find(
+//             e => e.document.uri.fsPath === targetUri.fsPath
+//         );
+
+//         targetEditor = await vscode.window.showTextDocument(qmdDoc, {
+//             viewColumn: targetEditor ? targetEditor.viewColumn : vscode.ViewColumn.One,
+//             preserveFocus: false,
+//             preview: false 
+//         });
+
+//         // Calculate the best column position
+//         const targetLineText = qmdDoc.lineAt(globalBestLine).text;
+//         let targetCol = 0;
+
+//         if (anchorWord) {
+//             // Try to find the exact word within the matched line
+//             const wordIdx = targetLineText.toLowerCase().indexOf(anchorWord.toLowerCase());
+//             if (wordIdx !== -1) {
+//                 targetCol = wordIdx;
+//             }
+//         }
+
+//         const pos = new vscode.Position(globalBestLine, targetCol);
+//         const anchorRange = qmdDoc.getWordRangeAtPosition(pos) || new vscode.Range(pos, pos.translate(0, Math.max(1, anchorWord.length)));
+        
+//         // Move selection to the exact word
+//         targetEditor.selection = new vscode.Selection(pos, pos);
+//         targetEditor.revealRange(
+//             new vscode.Range(pos, pos), 
+//             vscode.TextEditorRevealType.InCenter
+//         );
+        
+//         // --- VISUAL FEEDBACK: RED "CURSOR" PULSE ---
+//         const cursorDecoration = vscode.window.createTextEditorDecorationType({
+//             backgroundColor: 'rgba(255, 0, 0, 0.2)',
+//             border: '1px solid rgba(255, 0, 0, 0.8)',
+//             borderRadius: '2px',
+//             overviewRulerColor: 'red',
+//             overviewRulerLane: vscode.OverviewRulerLane.Full,
+//             fontWeight: 'bold'
+//         });
+
+//         // Apply decoration to the specific word/range
+//         targetEditor.setDecorations(cursorDecoration, [anchorRange]);
+
+//         // Remove the highlight after 1.2 seconds so it doesn't stay red forever
+//         setTimeout(() => cursorDecoration.dispose(), 1200);
+//     }
+// }
+
+// async function jumpToQmd(typEditor: vscode.TextEditor) {
+//     const typDoc = typEditor.document;
+//     const mainQmdPath = typDoc.fileName.replace('.typ', '.qmd');
+//     if (!fs.existsSync(mainQmdPath)) return;
+
+//     // 1. Get the specific word under the cursor to use as the "exact anchor"
+//     const cursorPosition = typEditor.selection.active;
+//     const wordRange = typDoc.getWordRangeAtPosition(cursorPosition);
+//     const anchorWord = wordRange ? typDoc.getText(wordRange) : "";
+
+//     // 2. Get the 10-word context for unique line identification
+//     const cursorOffset = typDoc.offsetAt(cursorPosition);
+//     const textAround = typDoc.getText(new vscode.Range(
+//         typDoc.positionAt(Math.max(0, cursorOffset - 150)),
+//         typDoc.positionAt(cursorOffset + 150)
+//     ));
+
+//     const words = textAround.match(/\b\w{3,}\b/g) || [];
+//     if (words.length === 0) return;
+
+//     const midIndex = Math.floor(words.length / 2);
+//     const searchWords = words.slice(Math.max(0, midIndex - 5), midIndex + 5)
+//                              .map(w => w.toLowerCase());
+
+//     const qmdFilesToSearch = getAllRelatedQmdFiles(mainQmdPath);
+//     let globalBestFile = '';
+//     let globalBestLine = -1;
+//     let globalHighScore = 0;
+
+//     for (const filePath of qmdFilesToSearch) {
+//         if (!fs.existsSync(filePath)) continue;
+//         const content = fs.readFileSync(filePath, 'utf8');
+//         const lines = content.split(/\r?\n/);
+
+//         lines.forEach((line, idx) => {
+//             if (line.trim().length < 3) return;
+            
+//             const lineLower = line.toLowerCase();
+//             let score = 0;
+//             searchWords.forEach(word => {
+//                 if (lineLower.includes(word)) score++;
+//             });
+
+//             if (score > globalHighScore) { 
+//                 globalHighScore = score; 
+//                 globalBestLine = idx; 
+//                 globalBestFile = filePath;
+//             }
+//         });
+//     }
+
+//     // 3. Navigation with Column Precision
+//     if (globalBestFile !== '' && globalHighScore > 1) {
+//         const targetUri = vscode.Uri.file(globalBestFile);
+//         const qmdDoc = await vscode.workspace.openTextDocument(targetUri);
+        
+//         let targetEditor = vscode.window.visibleTextEditors.find(
+//             e => e.document.uri.fsPath === targetUri.fsPath
+//         );
+
+//         targetEditor = await vscode.window.showTextDocument(qmdDoc, {
+//             viewColumn: targetEditor ? targetEditor.viewColumn : vscode.ViewColumn.One,
+//             preserveFocus: false,
+//             preview: false 
+//         });
+
+//         // Calculate the best column position
+//         const targetLineText = qmdDoc.lineAt(globalBestLine).text;
+//         let targetCol = 0;
+
+//         if (anchorWord) {
+//             // Try to find the exact word within the matched line
+//             const wordIdx = targetLineText.toLowerCase().indexOf(anchorWord.toLowerCase());
+//             if (wordIdx !== -1) {
+//                 targetCol = wordIdx;
+//             }
+//         }
+
+//         // ... (previous logic to find globalBestLine and targetCol)
+
+//         const pos = new vscode.Position(globalBestLine, targetCol);
+//         const anchorRange = qmdDoc.getWordRangeAtPosition(pos) || new vscode.Range(pos, pos.translate(0, 5));
+        
+//         // Move selection to the exact word
+//         targetEditor.selection = new vscode.Selection(pos, pos);
+//         targetEditor.revealRange(
+//             new vscode.Range(pos, pos), 
+//             vscode.TextEditorRevealType.InCenter
+//         );
+        
+//         // --- VISUAL FEEDBACK: RED "CURSOR" PULSE ---
+//         const cursorDecoration = vscode.window.createTextEditorDecorationType({
+//             backgroundColor: 'rgba(255, 0, 0, 0.2)',
+//             border: '1px solid rgba(255, 0, 0, 0.8)',
+//             borderRadius: '2px',
+//             overviewRulerColor: 'red',
+//             overviewRulerLane: vscode.OverviewRulerLane.Full,
+//             fontWeight: 'bold'
+//         });
+
+//         // Apply decoration to the specific word/range
+//         targetEditor.setDecorations(cursorDecoration, [anchorRange]);
+
+//         // Remove the highlight after 1.2 seconds so it doesn't stay red forever
+//         setTimeout(() => cursorDecoration.dispose(), 1200);
+//     }
+// }
 
