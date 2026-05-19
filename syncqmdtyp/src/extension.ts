@@ -8,6 +8,9 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 let isSyncing = false; 
 let isWebviewActive = false; 
 
+// Track the last active QMD file so we can redirect template .typ files back to the project root
+let lastActiveQmd: string | undefined;
+
 const outputChannel = vscode.window.createOutputChannel("Quarto -> Typst");
 
 export function activate(context: vscode.ExtensionContext) {
@@ -37,6 +40,11 @@ export function activate(context: vscode.ExtensionContext) {
 
     // AUTO-SYNC / JUMP BACK
     let autoSync = vscode.window.onDidChangeActiveTextEditor(async (editor) => {
+        // Keep track of the most recent .qmd file
+        if (editor && editor.document.languageId === 'quarto') {
+            lastActiveQmd = editor.document.fileName;
+        }
+
         if (isSyncing) return; 
         
         // If focus shifts to a Webview (like the Tinymist Preview)
@@ -48,15 +56,27 @@ export function activate(context: vscode.ExtensionContext) {
         const fileName = editor.document.fileName;
 
         if (fileName.endsWith('.typ')) {
-            const qmdPath = fileName.replace('.typ', '.qmd');
-            // ONLY jump if this .typ file belongs to a .qmd project
-            if (fs.existsSync(qmdPath)) {
+            const exactQmdPath = fileName.replace('.typ', '.qmd');
+            let targetQmdPath = exactQmdPath;
+
+            // If Tinymist jumps to a secondary style/template file (e.g. cores.typ)
+            // that doesn't have a matching .qmd, fallback to the last active .qmd project.
+            if (!fs.existsSync(exactQmdPath) && lastActiveQmd) {
+                const typDir = path.dirname(fileName) + path.sep;
+                const qmdDir = path.dirname(lastActiveQmd) + path.sep;
+                // Ensure they belong to the same project directory tree
+                if (typDir.startsWith(qmdDir) || qmdDir.startsWith(typDir)) {
+                    targetQmdPath = lastActiveQmd;
+                }
+            }
+
+            if (fs.existsSync(targetQmdPath)) {
                 if (isWebviewActive) {
                     isWebviewActive = false;
                     isSyncing = true;
                     setTimeout(async () => {
                         try {
-                            await jumpToQmd(editor);
+                            await jumpToQmd(editor, targetQmdPath);
                         } finally { isSyncing = false; }
                     }, 50);
                 }
@@ -246,9 +266,8 @@ async function syncQmdToTyp(qmdUri: vscode.Uri, lineIdx: number, viewCol?: vscod
     } catch (e) { console.error(e); }
 }
 
-async function jumpToQmd(typEditor: vscode.TextEditor) {
+async function jumpToQmd(typEditor: vscode.TextEditor, mainQmdPath: string) {
     const typDoc = typEditor.document;
-    const mainQmdPath = typDoc.fileName.replace('.typ', '.qmd');
     if (!fs.existsSync(mainQmdPath)) return;
 
     // 1. Get the specific word under the cursor to use as the "exact anchor"
@@ -328,6 +347,12 @@ async function jumpToQmd(typEditor: vscode.TextEditor) {
 
     // 3. Navigation with Column Precision
     if (globalBestFile !== '' && globalHighScore > 1) {
+        // Clean up: If Tinymist opened a secondary style file (like cores.typ), close it
+        if (typDoc.fileName !== mainQmdPath.replace('.qmd', '.typ')) {
+            await vscode.window.showTextDocument(typDoc, { preserveFocus: false });
+            await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+        }
+
         const targetUri = vscode.Uri.file(globalBestFile);
         const qmdDoc = await vscode.workspace.openTextDocument(targetUri);
         
@@ -385,6 +410,21 @@ async function jumpToQmd(typEditor: vscode.TextEditor) {
 
         // Remove the highlight after 1.2 seconds
         setTimeout(() => cursorDecoration.dispose(), 1200);
+    } else {
+        // No match found (likely clicked hardcoded template text in a secondary .typ file).
+        // Clean up the secondary .typ file and return to the main .qmd file.
+        if (typDoc.fileName !== mainQmdPath.replace('.qmd', '.typ')) {
+            await vscode.window.showTextDocument(typDoc, { preserveFocus: false });
+            await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+        }
+
+        const fallbackUri = vscode.Uri.file(mainQmdPath);
+        const qmdDoc = await vscode.workspace.openTextDocument(fallbackUri);
+        await vscode.window.showTextDocument(qmdDoc, {
+            viewColumn: vscode.ViewColumn.One,
+            preserveFocus: false,
+            preview: false 
+        });
     }
 }
 
@@ -637,4 +677,3 @@ async function jumpToQmd(typEditor: vscode.TextEditor) {
 //         setTimeout(() => cursorDecoration.dispose(), 1200);
 //     }
 // }
-
