@@ -3,6 +3,13 @@
   "description": "One-click render and invserse-search for Quarto-Typst workflows.",
   "author": "Longhai Li",
   "publisher": "Prof-LonghaiLi",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/longhaisk/vs-code-extensions.git"
+  },
+  "bugs": {
+    "url": "https://github.com/longhaisk/vs-code-extensions/issues"
+  },
   "extensionDependencies": [
     "quarto.quarto",
     "myriad-dreamin.tinymist"
