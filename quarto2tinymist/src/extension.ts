@@ -9,10 +9,14 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 let isSyncing = false; 
 let isWebviewActive = false; 
 let lastActiveQmd: string | undefined;
+let renderOnSave = true; // Default to auto-render
 
 // Background Server State
 let currentQuartoProcess: ChildProcess | undefined;
 let currentPreviewFile: string | undefined;
+
+// UI State
+let statusBarItem: vscode.StatusBarItem;
 
 // --- TERMINAL SETUP ---
 let renderTerminal: vscode.Terminal | undefined;
@@ -27,6 +31,11 @@ function getRenderTerminal() {
             close: () => {
                 renderTerminal = undefined;
                 terminalEmitter = undefined;
+                if (currentQuartoProcess) {
+                    currentQuartoProcess.kill();
+                    currentQuartoProcess = undefined;
+                    currentPreviewFile = undefined;
+                }
             }
         };
         renderTerminal = vscode.window.createTerminal({ name: "Quarto -> Typst", pty });
@@ -34,14 +43,47 @@ function getRenderTerminal() {
     return { terminal: renderTerminal, emitter: terminalEmitter };
 }
 
+function updateStatusBar() {
+    if (renderOnSave) {
+        statusBarItem.text = '$(check-all) Auto-Render';
+        statusBarItem.tooltip = 'Quarto background server is ON. Automatically renders on save. Click to disable.';
+    } else {
+        statusBarItem.text = '$(play-circle) Manual Render';
+        statusBarItem.tooltip = 'Auto-render is OFF. Will only render when you hit Play. Click to enable.';
+    }
+    statusBarItem.show();
+}
+
 export function activate(context: vscode.ExtensionContext) {
 
-    // COMMAND: Preview (Now starts the background server)
+    // STATUS BAR UI
+    statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+    statusBarItem.command = 'qmd2typ.toggleRenderOnSave';
+    updateStatusBar();
+    context.subscriptions.push(statusBarItem);
+
+    // COMMAND: Toggle Render Mode
+    let toggleCommand = vscode.commands.registerCommand('qmd2typ.toggleRenderOnSave', () => {
+        renderOnSave = !renderOnSave;
+        updateStatusBar();
+        
+        // If disabled while a server is running, kill the background server immediately
+        if (!renderOnSave && currentQuartoProcess) {
+            currentQuartoProcess.kill();
+            currentQuartoProcess = undefined;
+            currentPreviewFile = undefined;
+            if (terminalEmitter) {
+                terminalEmitter.fire(`\r\n\x1b[1;33m🛑 Auto-render disabled. Background server stopped.\x1b[0m\r\n`);
+            }
+        }
+    });
+
+    // COMMAND: Preview/Play
     let previewCommand = vscode.commands.registerCommand('qmd2typ.preview', async () => {
         const editor = vscode.window.activeTextEditor;
         if (editor && editor.document.languageId === 'quarto') {
             await editor.document.save(); 
-            await startQuartoPreviewServer(editor.document);
+            await executeQuartoRender(editor.document);
         }
     });
 
@@ -79,7 +121,6 @@ export function activate(context: vscode.ExtensionContext) {
                 const qmdDir = path.dirname(lastActiveQmd) + path.sep;
                 const typDir = path.dirname(fileName) + path.sep;
                 
-                // Protect against opening system/template Typst files outside the project
                 if (!typDir.startsWith(qmdDir)) {
                     isSyncing = true;
                     try {
@@ -114,124 +155,155 @@ export function activate(context: vscode.ExtensionContext) {
         }
     });
 
-    context.subscriptions.push(previewCommand, forwardSync, autoSync);
+    context.subscriptions.push(toggleCommand, previewCommand, forwardSync, autoSync);
 }
 
-// --- RENDER ENGINE (BACKGROUND SERVER) ---
+// --- UNIFIED RENDER ENGINE ---
 
-async function startQuartoPreviewServer(doc: vscode.TextDocument) {
+async function executeQuartoRender(doc: vscode.TextDocument) {
     const qmdPath = doc.fileName;
     const workspaceFolder = path.dirname(qmdPath);
     const typPath = qmdPath.replace('.qmd', '.typ');
 
-    // If the server is already running for THIS file, do nothing. 
-    // Quarto's file-watcher will pick up the save automatically.
-    if (currentQuartoProcess) {
-        if (currentPreviewFile === qmdPath) {
-            return; 
-        } else {
-            // If it's a different project, kill the old server before starting a new one.
+    if (renderOnSave) {
+        // ==========================================
+        // MODE: BACKGROUND SERVER (AUTO-RENDER)
+        // ==========================================
+        if (currentQuartoProcess) {
+            if (currentPreviewFile === qmdPath) return; // Already running
             currentQuartoProcess.kill();
             currentQuartoProcess = undefined;
         }
-    }
 
-    currentPreviewFile = qmdPath;
+        currentPreviewFile = qmdPath;
+        const args = ['preview', qmdPath, '--to', 'typst', '--no-browser', '-M', 'output-ext:typ', '-M', 'keep-typ:true'];
 
-    const args = [
-        'preview', qmdPath, 
-        '--to', 'typst', 
-        '--no-browser', 
-        '-M', 'output-ext:typ', 
-        '-M', 'keep-typ:true'
-    ];
+        const { terminal, emitter } = getRenderTerminal();
+        terminal.show(true); 
+        emitter.fire('\x1b[2J\x1b[3J\x1b[H'); 
+        emitter.fire(`\x1b[1;34m🚀 [Starting] Quarto Auto-Render Server for ${path.basename(qmdPath)}...\x1b[0m\r\n\r\n`);
 
-    const { terminal, emitter } = getRenderTerminal();
-    terminal.show(true); 
-    
-    emitter.fire('\x1b[2J\x1b[3J\x1b[H'); // Clear terminal
-    emitter.fire(`\x1b[1;34m🚀 [Starting] Quarto Preview Server for ${path.basename(qmdPath)}...\x1b[0m\r\n\r\n`);
-    emitter.fire(`\x1b[38;5;244m   (The server will run in the background. Simply save your file to update.)\x1b[0m\r\n`);
+        currentQuartoProcess = spawn('quarto', args, { cwd: workspaceFolder });
+        let hasError = false;
+        let refreshDebounce: NodeJS.Timeout | undefined;
 
-    currentQuartoProcess = spawn('quarto', args, { cwd: workspaceFolder });
-    
-    let hasError = false;
-    let refreshDebounce: NodeJS.Timeout | undefined;
+        const triggerRefreshAndJump = () => {
+            if (refreshDebounce) clearTimeout(refreshDebounce);
+            refreshDebounce = setTimeout(async () => {
+                if (hasError) return;
+                try {
+                    const typUri = vscode.Uri.file(typPath);
+                    const typDoc = await vscode.workspace.openTextDocument(typUri);
+                    await vscode.window.showTextDocument(typDoc, { preserveFocus: true, preview: false });
+                    await vscode.commands.executeCommand('workbench.action.files.revert', typUri);
+                    const edit = new vscode.WorkspaceEdit();
+                    const position = typDoc.lineAt(typDoc.lineCount - 1).range.end;
+                    edit.insert(typUri, position, ' ');
+                    await vscode.workspace.applyEdit(edit);
+                    const editUndo = new vscode.WorkspaceEdit();
+                    editUndo.delete(typUri, new vscode.Range(position, position.translate(0, 1)));
+                    await vscode.workspace.applyEdit(editUndo);
+                    await typDoc.save(); 
+                } catch (e) { }
 
-    // Trigger the Tinymist refresh and auto-sync
-    const triggerRefreshAndJump = () => {
-        if (refreshDebounce) clearTimeout(refreshDebounce);
-        
-        // Debounce by 200ms in case Quarto fires multiple rapid log lines
-        refreshDebounce = setTimeout(async () => {
-            if (hasError) return; // Don't jump if the render failed
+                const activeEditor = vscode.window.activeTextEditor;
+                if (activeEditor && activeEditor.document.fileName === qmdPath) {
+                    isSyncing = true;
+                    try {
+                        await syncQmdToTyp(activeEditor.document.uri, activeEditor.selection.active.line, activeEditor.viewColumn);
+                    } finally { isSyncing = false; }
+                }
+            }, 200);
+        };
 
-            // 1. Refresh Tinymist
-            try {
-                const typUri = vscode.Uri.file(typPath);
-                const typDoc = await vscode.workspace.openTextDocument(typUri);
-                await vscode.window.showTextDocument(typDoc, { preserveFocus: true, preview: false });
-
-                await vscode.commands.executeCommand('workbench.action.files.revert', typUri);
-
-                const edit = new vscode.WorkspaceEdit();
-                const lastLine = typDoc.lineCount - 1;
-                const position = typDoc.lineAt(lastLine).range.end;
-                
-                edit.insert(typUri, position, ' ');
-                await vscode.workspace.applyEdit(edit);
-                
-                const editUndo = new vscode.WorkspaceEdit();
-                editUndo.delete(typUri, new vscode.Range(position, position.translate(0, 1)));
-                await vscode.workspace.applyEdit(editUndo);
-                
-                await typDoc.save(); 
-            } catch (e) {
-                emitter.fire(`\x1b[1;33m⚠️ [Warning] Could not refresh .typ file: ${e}\x1b[0m\r\n`);
+        const processOutput = (data: Buffer) => {
+            const rawText = data.toString();
+            const cleanText = rawText.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
+            if (/error:|failed|exception/i.test(cleanText)) hasError = true;
+            if (cleanText.includes('Output created:')) {
+                hasError = false; 
+                triggerRefreshAndJump();
+                emitter.fire(`\x1b[1;32m🎉 [Success] Output updated.\x1b[0m\r\n`);
             }
+            emitter.fire(rawText.replace(/\r?\n/g, '\r\n'));
+        };
 
-            // 2. Jump to Cursor
-            const activeEditor = vscode.window.activeTextEditor;
-            // Only jump if the user is still looking at the QMD file that triggered the save
-            if (activeEditor && activeEditor.document.fileName === qmdPath) {
+        currentQuartoProcess.stdout?.on('data', processOutput);
+        currentQuartoProcess.stderr?.on('data', processOutput);
+        currentQuartoProcess.on('close', (code) => {
+            currentQuartoProcess = undefined;
+            currentPreviewFile = undefined;
+            if (terminalEmitter) emitter.fire(`\r\n\x1b[1;31m🛑 [Stopped] Server stopped (Exit Code: ${code}).\x1b[0m\r\n`);
+        });
+
+    } else {
+        // ==========================================
+        // MODE: ONE-SHOT (MANUAL RENDER)
+        // ==========================================
+        if (currentQuartoProcess) {
+            currentQuartoProcess.kill();
+            currentQuartoProcess = undefined;
+            currentPreviewFile = undefined;
+        }
+
+        const args = ['render', qmdPath, '--to', 'typst', '--cache', '-M', 'output-ext:typ', '-M', 'keep-typ:true'];
+
+        const { terminal, emitter } = getRenderTerminal();
+        terminal.show(true); 
+        emitter.fire('\x1b[2J\x1b[3J\x1b[H'); 
+        emitter.fire(`\x1b[1;34m🚀 [Rendering] ${path.basename(qmdPath)} (Manual Mode)...\x1b[0m\r\n\r\n`);
+
+        const quartoProcess = spawn('quarto', args, { cwd: workspaceFolder });
+        let hasError = false;
+
+        const processOutput = (data: Buffer) => {
+            const rawText = data.toString();
+            const cleanText = rawText.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
+            if (/error:|failed|exception/i.test(cleanText)) hasError = true;
+            emitter.fire(rawText.replace(/\r?\n/g, '\r\n'));
+        };
+
+        quartoProcess.stdout?.on('data', processOutput);
+        quartoProcess.stderr?.on('data', processOutput);
+
+        quartoProcess.on('close', async (code) => {
+            emitter.fire('\r\n--------------------------------------------------\r\n');
+            if (code === 0 && !hasError) {
+                emitter.fire(`\x1b[1;32m🎉 [Success] .typ file successfully updated.\x1b[0m\r\n`);
+                
+                try {
+                    const typUri = vscode.Uri.file(typPath);
+                    const typDoc = await vscode.workspace.openTextDocument(typUri);
+                    await vscode.window.showTextDocument(typDoc, { preserveFocus: true, preview: false });
+                    await vscode.commands.executeCommand('workbench.action.files.revert', typUri);
+                    const edit = new vscode.WorkspaceEdit();
+                    const position = typDoc.lineAt(typDoc.lineCount - 1).range.end;
+                    edit.insert(typUri, position, ' ');
+                    await vscode.workspace.applyEdit(edit);
+                    const editUndo = new vscode.WorkspaceEdit();
+                    editUndo.delete(typUri, new vscode.Range(position, position.translate(0, 1)));
+                    await vscode.workspace.applyEdit(editUndo);
+                    await typDoc.save(); 
+                } catch (e) {
+                    emitter.fire(`\x1b[1;33m⚠️ [Warning] Could not refresh .typ file: ${e}\x1b[0m\r\n`);
+                }
+
+                // Jump logic
                 isSyncing = true;
                 try {
-                    await syncQmdToTyp(activeEditor.document.uri, activeEditor.selection.active.line, activeEditor.viewColumn);
+                    const activeEditor = vscode.window.activeTextEditor;
+                    if (activeEditor && activeEditor.document.fileName === qmdPath) {
+                        await syncQmdToTyp(activeEditor.document.uri, activeEditor.selection.active.line, activeEditor.viewColumn);
+                    }
                 } finally {
                     isSyncing = false;
                 }
+            } else {
+                const finalCode = code !== 0 ? code : 'Caught by log parser';
+                emitter.fire(`\x1b[1;31m🔥 [Error] Render failed (Exit Code: ${finalCode}).\x1b[0m\r\n`);
             }
-        }, 200);
-    };
-
-    const processOutput = (data: Buffer) => {
-        const rawText = data.toString();
-        const cleanText = rawText.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
-        
-        if (/error:|failed|exception/i.test(cleanText)) {
-            hasError = true;
-        }
-
-        // Quarto `preview` logs "Output created:" when the render loop finishes successfully.
-        if (cleanText.includes('Output created:')) {
-            hasError = false; 
-            triggerRefreshAndJump();
-            emitter.fire(`\x1b[1;32m🎉 [Success] Output updated.\x1b[0m\r\n`);
-        }
-
-        // Output exactly what Quarto gives us, preserving colors
-        const terminalText = rawText.replace(/\r?\n/g, '\r\n');
-        emitter.fire(terminalText);
-    };
-
-    currentQuartoProcess.stdout?.on('data', processOutput);
-    currentQuartoProcess.stderr?.on('data', processOutput);
-
-    currentQuartoProcess.on('close', (code) => {
-        currentQuartoProcess = undefined;
-        currentPreviewFile = undefined;
-        emitter.fire(`\r\n\x1b[1;31m🛑 [Stopped] Quarto Preview Server stopped (Exit Code: ${code}).\x1b[0m\r\n`);
-    });
+        });
+    }
 }
 
 // --- HELPER: Find all included .qmd files recursively ---
@@ -442,7 +514,6 @@ async function jumpToQmd(typEditor: vscode.TextEditor, mainQmdPath: string) {
     }
 }
 
-// Ensure the background process dies if the user closes VS Code entirely
 export function deactivate() {
     if (currentQuartoProcess) {
         currentQuartoProcess.kill();

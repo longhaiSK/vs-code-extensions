@@ -7,30 +7,15 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 let isSyncing = false; 
 let isWebviewActive = false; 
+
+// Track the last active QMD file so we can redirect template .typ files back to the project root
 let lastActiveQmd: string | undefined;
 
-// --- TERMINAL SETUP ---
-let renderTerminal: vscode.Terminal | undefined;
-let terminalEmitter: vscode.EventEmitter<string> | undefined;
-
-function getRenderTerminal() {
-    if (!renderTerminal || !terminalEmitter) {
-        terminalEmitter = new vscode.EventEmitter<string>();
-        const pty: vscode.Pseudoterminal = {
-            onDidWrite: terminalEmitter.event,
-            open: () => {},
-            close: () => {
-                renderTerminal = undefined;
-                terminalEmitter = undefined;
-            }
-        };
-        renderTerminal = vscode.window.createTerminal({ name: "Quarto -> Typst", pty });
-    }
-    return { terminal: renderTerminal, emitter: terminalEmitter };
-}
+const outputChannel = vscode.window.createOutputChannel("Quarto -> Typst");
 
 export function activate(context: vscode.ExtensionContext) {
 
+    // COMMAND: Render
     let previewCommand = vscode.commands.registerCommand('qmd2typ.preview', async () => {
         const editor = vscode.window.activeTextEditor;
         if (editor && editor.document.languageId === 'quarto') {
@@ -39,6 +24,7 @@ export function activate(context: vscode.ExtensionContext) {
         }
     });
 
+    // COMMAND: Forward Sync
     let forwardSync = vscode.commands.registerCommand('qmd2typ.forwardSync', async () => {
         if (isSyncing) return;
         const qmdEditor = vscode.window.activeTextEditor;
@@ -52,13 +38,16 @@ export function activate(context: vscode.ExtensionContext) {
         }
     });
 
+    // AUTO-SYNC / JUMP BACK
     let autoSync = vscode.window.onDidChangeActiveTextEditor(async (editor) => {
+        // Keep track of the most recent .qmd file
         if (editor && editor.document.languageId === 'quarto') {
             lastActiveQmd = editor.document.fileName;
         }
 
         if (isSyncing) return; 
         
+        // If focus shifts to a Webview (like the Tinymist Preview)
         if (!editor) { 
             isWebviewActive = true; 
             return; 
@@ -67,10 +56,12 @@ export function activate(context: vscode.ExtensionContext) {
         const fileName = editor.document.fileName;
 
         if (fileName.endsWith('.typ')) {
+            // --- FIX 1: Restrict opening system/external Typst files ---
             if (lastActiveQmd) {
                 const qmdDir = path.dirname(lastActiveQmd) + path.sep;
                 const typDir = path.dirname(fileName) + path.sep;
                 
+                // If the opened .typ file is outside the QMD project directory, close it immediately.
                 if (!typDir.startsWith(qmdDir)) {
                     isSyncing = true;
                     try {
@@ -87,6 +78,7 @@ export function activate(context: vscode.ExtensionContext) {
             const exactQmdPath = fileName.replace('.typ', '.qmd');
             let targetQmdPath = exactQmdPath;
 
+            // If Tinymist jumps to a secondary local style/template file (e.g. _extensions/.../core.typ)
             if (!fs.existsSync(exactQmdPath) && lastActiveQmd) {
                 targetQmdPath = lastActiveQmd;
             }
@@ -123,51 +115,76 @@ async function startQuartoRender(doc: vscode.TextDocument, jumpAfter: boolean) {
         '-M', 'keep-typ:true'
     ];
 
-    const { terminal, emitter } = getRenderTerminal();
-    terminal.show(true); 
-    
-    // Clear the terminal screen using ANSI escape codes
-    emitter.fire('\x1b[2J\x1b[3J\x1b[H');
-    // Print a bold, blue starting message
-    emitter.fire(`\x1b[1;34m🚀 [Starting] Rendering ${path.basename(qmdPath)} to Typst...\x1b[0m\r\n\r\n`);
+    outputChannel.clear();
+    outputChannel.show(true); 
+    outputChannel.appendLine(`🚀 [Starting] Rendering ${path.basename(qmdPath)} to Typst...\n`);
+    outputChannel.appendLine(`--------------------------------------------------`);
 
     const quartoProcess = spawn('quarto', args, { cwd: workspaceFolder });
     
     let hasError = false;
+    let isCapturingErrorBlock = false;
 
-    const processOutput = (data: Buffer) => {
-        const rawText = data.toString();
+    // --- FIX 2: Enhanced Multiline Error Capture & Debug Logging ---
+    const processOutput = (data: Buffer, isStderr: boolean) => {
+        const text = data.toString();
+        const lines = text.split(/\r?\n/);
         
-        // 1. Strip colors strictly for our internal error detection logic
-        const cleanText = rawText.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
-        if (/error:|failed|exception/i.test(cleanText)) {
-            hasError = true;
-        }
+        lines.forEach(line => {
+            const trimmed = line.trim();
+            
+            // Preserve empty lines only if we are inside a multiline error block
+            if (!trimmed) {
+                if (isCapturingErrorBlock) outputChannel.appendLine(""); 
+                return;
+            }
 
-        // 2. Format line endings for the Terminal (\r\n is required for terminals)
-        const terminalText = rawText.replace(/\r?\n/g, '\r\n');
-        
-        // 3. Print the raw output WITH colors directly to the terminal!
-        emitter.fire(terminalText);
+            const isError = /error:|failed|exception/i.test(trimmed);
+            const isWarning = /warning:/i.test(trimmed);
+            
+            if (isError) {
+                hasError = true;
+                isCapturingErrorBlock = true;
+                outputChannel.appendLine(`❌ ERROR: ${trimmed}`);
+            } 
+            else if (isWarning) {
+                outputChannel.appendLine(`⚠️ WARNING: ${trimmed}`);
+            } 
+            else if (trimmed.startsWith('processing file:') || trimmed.includes('output file:')) {
+                isCapturingErrorBlock = false; // Reset error block on successful progress
+                outputChannel.appendLine(`✅ PROGRESS: ${trimmed}`);
+            } 
+            else {
+                if (isCapturingErrorBlock) {
+                    // Indent stack traces/error continuations for readability
+                    outputChannel.appendLine(`       ${line}`);
+                } else {
+                    // Log everything else so no debugging context is lost!
+                    outputChannel.appendLine(`📝 ${line}`);
+                }
+            }
+        });
     };
 
-    quartoProcess.stdout?.on('data', processOutput);
-    quartoProcess.stderr?.on('data', processOutput);
+    quartoProcess.stdout?.on('data', (data) => processOutput(data, false));
+    quartoProcess.stderr?.on('data', (data) => processOutput(data, true));
 
     quartoProcess.on('close', async (code) => {
-        emitter.fire('\r\n--------------------------------------------------\r\n');
+        outputChannel.appendLine(`--------------------------------------------------`);
         if (code === 0 && !hasError) {
-            // Print a bold green success message
-            emitter.fire(`\x1b[1;32m🎉 [Success] .typ file successfully updated.\x1b[0m\r\n`);
+            outputChannel.appendLine(`🎉 [Success] .typ file successfully updated.`);
             
             try {
                 const typUri = vscode.Uri.file(typPath);
                 const typDoc = await vscode.workspace.openTextDocument(typUri);
                 
+                // 1. Show the document (or ensure it's loaded)
                 const typEditor = await vscode.window.showTextDocument(typDoc, { preserveFocus: true, preview: false });
 
+                // 2. FORCE REFRESH FROM DISK
                 await vscode.commands.executeCommand('workbench.action.files.revert', typUri);
 
+                // 3. Trigger Tinymist refresh (The "Fake Edit")
                 const edit = new vscode.WorkspaceEdit();
                 const lastLine = typDoc.lineCount - 1;
                 const position = typDoc.lineAt(lastLine).range.end;
@@ -182,7 +199,7 @@ async function startQuartoRender(doc: vscode.TextDocument, jumpAfter: boolean) {
                 await typDoc.save(); 
 
             } catch (e) {
-                emitter.fire(`\x1b[1;33m⚠️ [Warning] Could not refresh .typ file: ${e}\x1b[0m\r\n`);
+                outputChannel.appendLine(`⚠️ [Warning] Could not refresh .typ file: ${e}`);
             }
 
             if (jumpAfter) {
@@ -195,13 +212,12 @@ async function startQuartoRender(doc: vscode.TextDocument, jumpAfter: boolean) {
             }
         } else {
             const finalCode = code !== 0 ? code : 'Caught by log parser';
-            // Print a bold red error message
-            emitter.fire(`\x1b[1;31m🔥 [Error] Render failed (Exit Code: ${finalCode}). Check the trace above.\x1b[0m\r\n`);
+            outputChannel.appendLine(`🔥 [Error] Render failed (Exit Code: ${finalCode}). Check the trace above for details.`);
         }
     });
 }
 
-// ... (getAllRelatedQmdFiles, syncQmdToTyp, and jumpToQmd remain exactly the same as the previous response) ...
+// --- HELPER: Find all included .qmd files recursively ---
 
 function getAllRelatedQmdFiles(mainQmdPath: string): string[] {
     const files = new Set<string>();
@@ -226,6 +242,8 @@ function getAllRelatedQmdFiles(mainQmdPath: string): string[] {
     }
     return Array.from(files);
 }
+
+// --- SYNC & JUMP FUNCTIONS ---
 
 async function syncQmdToTyp(qmdUri: vscode.Uri, lineIdx: number, viewCol?: vscode.ViewColumn) {
     const qmdPath = qmdUri.fsPath;
@@ -271,12 +289,15 @@ async function jumpToQmd(typEditor: vscode.TextEditor, mainQmdPath: string) {
     const typDoc = typEditor.document;
     if (!fs.existsSync(mainQmdPath)) return;
 
+    // 1. Get the specific word under the cursor to use as the "exact anchor"
     const cursorPosition = typEditor.selection.active;
     const wordRange = typDoc.getWordRangeAtPosition(cursorPosition);
     const anchorWord = wordRange ? typDoc.getText(wordRange) : "";
 
+    // 2. Get context for both exact matching and tie-breaking
     const cursorOffset = typDoc.offsetAt(cursorPosition);
     
+    // Grab a larger chunk of text (about 300 chars either way)
     const textAround = typDoc.getText(new vscode.Range(
         typDoc.positionAt(Math.max(0, cursorOffset - 300)),
         typDoc.positionAt(cursorOffset + 300)
@@ -287,9 +308,11 @@ async function jumpToQmd(typEditor: vscode.TextEditor, mainQmdPath: string) {
 
     const midIndex = Math.floor(allWords.length / 2);
     
+    // Primary Zone: ~12 words right around the cursor for the exact line match
     const searchWords = allWords.slice(Math.max(0, midIndex - 6), midIndex + 6)
                                 .map(w => w.toLowerCase());
                                 
+    // Context Zone: ~30 words total to act as our tie-breaker
     const contextWords = allWords.slice(Math.max(0, midIndex - 15), midIndex + 15)
                                  .map(w => w.toLowerCase());
 
@@ -309,10 +332,12 @@ async function jumpToQmd(typEditor: vscode.TextEditor, mainQmdPath: string) {
             const lineLower = line.toLowerCase();
             let score = 0;
             
+            // --- Phase 1: Primary Exact Match ---
             searchWords.forEach(word => {
                 if (lineLower.includes(word)) score += 1;
             });
 
+            // --- Phase 2: Contextual Tie-Breaker ---
             if (score > (searchWords.length * 0.4)) { 
                 let surroundingQmd = "";
                 for (let offset = -2; offset <= 2; offset++) {
@@ -330,6 +355,7 @@ async function jumpToQmd(typEditor: vscode.TextEditor, mainQmdPath: string) {
                 });
             }
 
+            // Update the global high score
             if (score > globalHighScore) { 
                 globalHighScore = score; 
                 globalBestLine = idx; 
@@ -338,7 +364,9 @@ async function jumpToQmd(typEditor: vscode.TextEditor, mainQmdPath: string) {
         });
     }
 
+    // 3. Navigation with Column Precision
     if (globalBestFile !== '' && globalHighScore > 1) {
+        // Clean up: If Tinymist opened a secondary style file, close it securely
         if (typDoc.fileName !== mainQmdPath.replace('.qmd', '.typ')) {
             await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
         }
@@ -356,14 +384,17 @@ async function jumpToQmd(typEditor: vscode.TextEditor, mainQmdPath: string) {
             preview: false 
         });
 
+        // Calculate the best column position
         const targetLineText = qmdDoc.lineAt(globalBestLine).text;
         let startCol = 0;
         let endCol = 0;
 
         if (anchorWord) {
+            // Try to find the exact word within the matched line
             const wordIdx = targetLineText.toLowerCase().indexOf(anchorWord.toLowerCase());
             if (wordIdx !== -1) {
                 startCol = wordIdx;
+                // Calculate the exact character index right after the word
                 endCol = wordIdx + anchorWord.length; 
             }
         }
@@ -371,15 +402,18 @@ async function jumpToQmd(typEditor: vscode.TextEditor, mainQmdPath: string) {
         const startPos = new vscode.Position(globalBestLine, startCol);
         const cursorPos = new vscode.Position(globalBestLine, endCol > 0 ? endCol : startCol);
         
+        // Define the range for the red visual pulse (highlights the whole word)
         const anchorRange = qmdDoc.getWordRangeAtPosition(startPos) || 
                             new vscode.Range(startPos, new vscode.Position(globalBestLine, startCol + Math.max(1, anchorWord.length)));
         
+        // Move selection (cursor) to the EXACT END of the word
         targetEditor.selection = new vscode.Selection(cursorPos, cursorPos);
         targetEditor.revealRange(
             new vscode.Range(cursorPos, cursorPos), 
             vscode.TextEditorRevealType.InCenter
         );
         
+        // --- VISUAL FEEDBACK: RED "CURSOR" PULSE ---
         const cursorDecoration = vscode.window.createTextEditorDecorationType({
             backgroundColor: 'rgba(255, 0, 0, 0.2)',
             border: '1px solid rgba(255, 0, 0, 0.8)',
@@ -389,10 +423,13 @@ async function jumpToQmd(typEditor: vscode.TextEditor, mainQmdPath: string) {
             fontWeight: 'bold'
         });
 
+        // Apply decoration to the specific word/range
         targetEditor.setDecorations(cursorDecoration, [anchorRange]);
 
+        // Remove the highlight after 1.2 seconds
         setTimeout(() => cursorDecoration.dispose(), 1200);
     } else {
+        // No match found. Clean up secondary .typ files safely.
         if (typDoc.fileName !== mainQmdPath.replace('.qmd', '.typ')) {
             await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
         }
