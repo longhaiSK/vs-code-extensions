@@ -44,7 +44,8 @@
     "commands": [
       {
         "command": "qmd2typ.preview",
-        "title": "Render Quarto to Typst"
+        "title": "Render Quarto to Typst",
+        "icon": "$(play)"
       },
       {
         "command": "qmd2typ.forwardSync",
@@ -62,30 +63,16 @@
         }
       }
     },
-    "keybindings": [
-      {
-        "command": "qmd2typ.preview",
-        "key": "shift+cmd+v",
-        "mac": "shift+cmd+v",
-        "when": "editorLangId == quarto"
-      },
-      {
-        "command": "qmd2typ.forwardSync",
-        "key": "shift+cmd+f",
-        "mac": "shift+cmd+f",
-        "when": "editorLangId == quarto"
-      }
-    ],
     "menus": {
       "editor/title": [
         {
           "command": "qmd2typ.preview",
-          "when": "editorLangId == quarto",
+          "when": "resourceExtname == .qmd",
           "group": "navigation@1"
         },
         {
           "command": "qmd2typ.forwardSync",
-          "when": "editorLangId == quarto",
+          "when": "resourceExtname == .qmd",
           "group": "navigation@2"
         }
       ]

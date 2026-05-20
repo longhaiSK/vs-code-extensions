@@ -9,6 +9,7 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 let isSyncing = false; 
 let isWebviewActive = false; 
 let lastActiveQmd: string | undefined;
+let renderOnSave = true; // Default preference for the checkbox
 
 // Background Server State
 let currentQuartoProcess: ChildProcess | undefined;
@@ -41,19 +42,24 @@ function getRenderTerminal() {
 
 export function activate(context: vscode.ExtensionContext) {
 
-    // Listen for the user clicking the Checkbox in Positron Settings
-    let configListener = vscode.workspace.onDidChangeConfiguration(e => {
-        if (e.affectsConfiguration('qmd2typ.renderOnSave')) {
-            const renderOnSave = vscode.workspace.getConfiguration('qmd2typ').get<boolean>('renderOnSave', true);
-            
-            // If the user unchecked the box, kill any running background server immediately
-            if (!renderOnSave && currentQuartoProcess) {
-                currentQuartoProcess.kill();
-                currentQuartoProcess = undefined;
-                currentPreviewFile = undefined;
-                if (terminalEmitter) {
-                    terminalEmitter.fire(`\r\n\x1b[1;33m🛑 Auto-render disabled via Settings. Background server stopped.\x1b[0m\r\n`);
-                }
+    // 1. Tell Positron the initial state so the checkbox starts checked
+    vscode.commands.executeCommand('setContext', 'qmd2typ.isRenderOnSave', renderOnSave);
+
+    // COMMAND: Toggle Render Mode (Fired when user clicks the checkbox in the title menu)
+    let toggleCommand = vscode.commands.registerCommand('qmd2typ.toggleRenderOnSave', () => {
+        // Flip the boolean
+        renderOnSave = !renderOnSave;
+        
+        // Tell Positron to update the checkbox UI
+        vscode.commands.executeCommand('setContext', 'qmd2typ.isRenderOnSave', renderOnSave);
+        
+        // If the user unchecked the box, kill any running background server immediately
+        if (!renderOnSave && currentQuartoProcess) {
+            currentQuartoProcess.kill();
+            currentQuartoProcess = undefined;
+            currentPreviewFile = undefined;
+            if (terminalEmitter) {
+                terminalEmitter.fire(`\r\n\x1b[1;33m🛑 Auto-render disabled. Background server stopped.\x1b[0m\r\n`);
             }
         }
     });
@@ -135,7 +141,7 @@ export function activate(context: vscode.ExtensionContext) {
         }
     });
 
-    context.subscriptions.push(configListener, previewCommand, forwardSync, autoSync);
+    context.subscriptions.push(toggleCommand, previewCommand, forwardSync, autoSync);
 }
 
 // --- UNIFIED RENDER ENGINE ---
@@ -144,9 +150,6 @@ async function executeQuartoRender(doc: vscode.TextDocument) {
     const qmdPath = doc.fileName;
     const workspaceFolder = path.dirname(qmdPath);
     const typPath = qmdPath.replace('.qmd', '.typ');
-
-    // Read the checkbox setting directly from Positron
-    const renderOnSave = vscode.workspace.getConfiguration('qmd2typ').get<boolean>('renderOnSave', true);
 
     if (renderOnSave) {
         // ==========================================
@@ -356,6 +359,8 @@ async function syncQmdToTyp(qmdUri: vscode.Uri, lineIdx: number, viewCol?: vscod
     } catch (e) { console.error(e); }
 }
 
+// --- SYNC & JUMP FUNCTIONS ---
+
 async function jumpToQmd(typEditor: vscode.TextEditor, mainQmdPath: string) {
     const typDoc = typEditor.document;
     if (!fs.existsSync(mainQmdPath)) return;
@@ -441,15 +446,16 @@ async function jumpToQmd(typEditor: vscode.TextEditor, mainQmdPath: string) {
 
         targetEditor = await vscode.window.showTextDocument(qmdDoc, {
             viewColumn: targetEditor ? targetEditor.viewColumn : vscode.ViewColumn.One,
-            preserveFocus: false,
+            preserveFocus: false, // Forces focus onto the editor
             preview: false 
         });
 
         const targetLineText = qmdDoc.lineAt(globalBestLine).text;
         let startCol = 0;
-        let endCol = 0;
+        let endCol = targetLineText.length; // Default to end of line if word isn't found
 
         if (anchorWord) {
+            // Find exactly where the word is in the target line
             const wordIdx = targetLineText.toLowerCase().indexOf(anchorWord.toLowerCase());
             if (wordIdx !== -1) {
                 startCol = wordIdx;
@@ -457,13 +463,17 @@ async function jumpToQmd(typEditor: vscode.TextEditor, mainQmdPath: string) {
             }
         }
 
+        // Place the cursor exactly after the word
         const startPos = new vscode.Position(globalBestLine, startCol);
-        const cursorPos = new vscode.Position(globalBestLine, endCol > 0 ? endCol : startCol);
+        const cursorPos = new vscode.Position(globalBestLine, endCol);
         
         const anchorRange = qmdDoc.getWordRangeAtPosition(startPos) || 
                             new vscode.Range(startPos, new vscode.Position(globalBestLine, startCol + Math.max(1, anchorWord.length)));
         
+        // This moves the blinking cursor
         targetEditor.selection = new vscode.Selection(cursorPos, cursorPos);
+        
+        // This scrolls the window
         targetEditor.revealRange(
             new vscode.Range(cursorPos, cursorPos), 
             vscode.TextEditorRevealType.InCenter
@@ -479,8 +489,8 @@ async function jumpToQmd(typEditor: vscode.TextEditor, mainQmdPath: string) {
         });
 
         targetEditor.setDecorations(cursorDecoration, [anchorRange]);
-
         setTimeout(() => cursorDecoration.dispose(), 1200);
+        
     } else {
         if (typDoc.fileName !== mainQmdPath.replace('.qmd', '.typ')) {
             await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
