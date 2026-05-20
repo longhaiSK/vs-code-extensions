@@ -1,3 +1,10 @@
+// ============================================================================
+// FUTURE AI / DEVELOPER WARNING: 
+// Do NOT "clean up", refactor, or delete the cursor movement logic, 
+// "jiggles", or file-modification hacks in this file. They are critical 
+// workarounds for VS Code API limitations and Tinymist PDF sync behaviors.
+// ============================================================================
+
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -49,7 +56,9 @@ export function activate(context: vscode.ExtensionContext) {
 
         isSyncing = true; 
         try {
-            await syncQmdToTyp(qmdEditor.document.uri, qmdEditor.selection.active, qmdEditor.viewColumn);
+            // CRITICAL UX: Pass "false" for returnFocus. 
+            // The Eye button should intentionally leave the user in the .typ file!
+            await syncQmdToTyp(qmdEditor.document.uri, qmdEditor.selection.active, qmdEditor.viewColumn, false);
         } finally {
             isSyncing = false;
         }
@@ -63,6 +72,9 @@ export function activate(context: vscode.ExtensionContext) {
 
         if (isSyncing) return; 
         
+        // CRITICAL: We track if the user clicked into the Tinymist PDF Webview.
+        // If they click the PDF, editor becomes undefined. We flag it so we know 
+        // to intercept the subsequent .typ file opening.
         if (!editor) { 
             isWebviewActive = true; 
             return; 
@@ -71,23 +83,6 @@ export function activate(context: vscode.ExtensionContext) {
         const fileName = editor.document.fileName;
 
         if (fileName.endsWith('.typ')) {
-            if (lastActiveQmd) {
-                const qmdDir = path.dirname(lastActiveQmd) + path.sep;
-                const typDir = path.dirname(fileName) + path.sep;
-                
-                if (!typDir.startsWith(qmdDir)) {
-                    isSyncing = true;
-                    try {
-                        await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
-                        const doc = await vscode.workspace.openTextDocument(lastActiveQmd);
-                        await vscode.window.showTextDocument(doc, { preserveFocus: false, preview: false });
-                    } finally {
-                        isSyncing = false;
-                    }
-                    return;
-                }
-            }
-
             const exactQmdPath = fileName.replace('.typ', '.qmd');
             let targetQmdPath = exactQmdPath;
 
@@ -95,17 +90,21 @@ export function activate(context: vscode.ExtensionContext) {
                 targetQmdPath = lastActiveQmd;
             }
 
-            if (fs.existsSync(targetQmdPath)) {
-                if (isWebviewActive) {
-                    isWebviewActive = false;
-                    isSyncing = true;
-                    setTimeout(async () => {
-                        try {
-                            await jumpToQmd(editor, targetQmdPath);
-                        } finally { isSyncing = false; }
-                    }, 50);
-                }
+            // CRITICAL UX: Only jump back to QMD if the TYP file was triggered 
+            // by clicking the PDF (isWebviewActive). If the user manually clicked 
+            // the .typ file in their file explorer, we leave them alone so they can edit it!
+            if (fs.existsSync(targetQmdPath) && isWebviewActive) {
+                isWebviewActive = false;
+                isSyncing = true;
+                setTimeout(async () => {
+                    try {
+                        await jumpToQmd(editor, targetQmdPath);
+                    } finally { isSyncing = false; }
+                }, 50);
             }
+        } else {
+            // Reset flag if they clicked on something else
+            isWebviewActive = false; 
         }
     });
 
@@ -146,17 +145,7 @@ async function executeQuartoRender(doc: vscode.TextDocument) {
             
             try {
                 const typUri = vscode.Uri.file(typPath);
-                const typDoc = await vscode.workspace.openTextDocument(typUri);
-                await vscode.window.showTextDocument(typDoc, { preserveFocus: true, preview: false });
                 await vscode.commands.executeCommand('workbench.action.files.revert', typUri);
-                const edit = new vscode.WorkspaceEdit();
-                const position = typDoc.lineAt(typDoc.lineCount - 1).range.end;
-                edit.insert(typUri, position, ' ');
-                await vscode.workspace.applyEdit(edit);
-                const editUndo = new vscode.WorkspaceEdit();
-                editUndo.delete(typUri, new vscode.Range(position, position.translate(0, 1)));
-                await vscode.workspace.applyEdit(editUndo);
-                await typDoc.save(); 
             } catch (e) {
                 emitter.fire(`\x1b[1;33m⚠️ [Warning] Could not refresh .typ file: ${e}\x1b[0m\r\n`);
             }
@@ -165,7 +154,9 @@ async function executeQuartoRender(doc: vscode.TextDocument) {
             try {
                 const activeEditor = vscode.window.activeTextEditor;
                 if (activeEditor && activeEditor.document.fileName === qmdPath) {
-                    await syncQmdToTyp(activeEditor.document.uri, activeEditor.selection.active, activeEditor.viewColumn);
+                    // CRITICAL UX: Pass "true" for returnFocus.
+                    // After a render finishes, the user wants to keep typing in their .qmd file.
+                    await syncQmdToTyp(activeEditor.document.uri, activeEditor.selection.active, activeEditor.viewColumn, true);
                 }
             } finally {
                 isSyncing = false;
@@ -205,25 +196,23 @@ function getAllRelatedQmdFiles(mainQmdPath: string): string[] {
 
 // --- SYNC & JUMP FUNCTIONS ---
 
-async function syncQmdToTyp(qmdUri: vscode.Uri, cursor: vscode.Position, viewCol?: vscode.ViewColumn) {
+// Added `returnFocus` parameter with a default of true
+async function syncQmdToTyp(qmdUri: vscode.Uri, cursor: vscode.Position, viewCol?: vscode.ViewColumn, returnFocus: boolean = true) {
     const qmdPath = qmdUri.fsPath;
     const typPath = qmdPath.replace('.qmd', '.typ');
+    const typUri = vscode.Uri.file(typPath);
     if (!fs.existsSync(typPath)) return;
 
     try {
-        const targetColumn = viewCol || vscode.ViewColumn.One;
-        const typDoc = await vscode.workspace.openTextDocument(vscode.Uri.file(typPath));
-        const typEditor = await vscode.window.showTextDocument(typDoc, { 
-            viewColumn: targetColumn, 
-            preserveFocus: false 
-        });
-
         const qmdDoc = await vscode.workspace.openTextDocument(qmdUri);
         
-        // Grab word at cursor, or fallback to the next word on the line
         let wordRange = qmdDoc.getWordRangeAtPosition(cursor);
         let anchorWord = wordRange ? qmdDoc.getText(wordRange) : "";
 
+        // CRITICAL UX: The Empty Space Lookahead
+        // If the user's cursor is sitting in a blank space right before a word, VS Code
+        // returns an empty string. This block scans forward on the same line to find 
+        // the very next word so the user doesn't have to highlight text to sync.
         if (!anchorWord) {
             const lineText = qmdDoc.lineAt(cursor.line).text;
             const textAfterCursor = lineText.substring(cursor.character);
@@ -233,6 +222,10 @@ async function syncQmdToTyp(qmdUri: vscode.Uri, cursor: vscode.Position, viewCol
             }
         }
 
+        // CRITICAL: 300-Character Context Window
+        // We do not just match line numbers, because Quarto alters line counts during render.
+        // We grab 300 characters around the cursor to create a highly accurate "fingerprint" 
+        // to find the exact matching line in the compiled Typst file.
         const cursorOffset = qmdDoc.offsetAt(cursor);
         const textAround = qmdDoc.getText(new vscode.Range(
             qmdDoc.positionAt(Math.max(0, cursorOffset - 300)),
@@ -243,26 +236,20 @@ async function syncQmdToTyp(qmdUri: vscode.Uri, cursor: vscode.Position, viewCol
         if (allWords.length === 0) return;
 
         const midIndex = Math.floor(allWords.length / 2);
-        
-        const searchWords = allWords.slice(Math.max(0, midIndex - 6), midIndex + 6)
-                                    .map(w => w.toLowerCase());
-                                    
-        const contextWords = allWords.slice(Math.max(0, midIndex - 15), midIndex + 15)
-                                     .map(w => w.toLowerCase());
+        const searchWords = allWords.slice(Math.max(0, midIndex - 6), midIndex + 6).map(w => w.toLowerCase());
+        const contextWords = allWords.slice(Math.max(0, midIndex - 15), midIndex + 15).map(w => w.toLowerCase());
 
+        const typDoc = await vscode.workspace.openTextDocument(typUri);
         const typLines = typDoc.getText().split(/\r?\n/);
         let globalBestLine = -1;
         let globalHighScore = 0;
 
         typLines.forEach((line, idx) => {
             if (line.trim().length < 3) return;
-            
             const lineLower = line.toLowerCase();
             let score = 0;
             
-            searchWords.forEach(word => {
-                if (lineLower.includes(word)) score += 1;
-            });
+            searchWords.forEach(word => { if (lineLower.includes(word)) score += 1; });
 
             if (score > (searchWords.length * 0.4)) { 
                 let surroundingTyp = "";
@@ -273,18 +260,12 @@ async function syncQmdToTyp(qmdUri: vscode.Uri, cursor: vscode.Position, viewCol
                     }
                 }
                 const surroundingLower = surroundingTyp.toLowerCase();
-
                 contextWords.forEach(word => {
-                    if (!searchWords.includes(word) && surroundingLower.includes(word)) {
-                        score += 0.2; 
-                    }
+                    if (!searchWords.includes(word) && surroundingLower.includes(word)) { score += 0.2; }
                 });
             }
 
-            if (score > globalHighScore) { 
-                globalHighScore = score; 
-                globalBestLine = idx; 
-            }
+            if (score > globalHighScore) { globalHighScore = score; globalBestLine = idx; }
         });
 
         if (globalBestLine !== -1 && globalHighScore > 1) {
@@ -292,6 +273,7 @@ async function syncQmdToTyp(qmdUri: vscode.Uri, cursor: vscode.Position, viewCol
             let startCol = 0;
             let endCol = targetLineText.length; 
 
+            // Place the cursor exactly AFTER the matched word
             if (anchorWord) {
                 const wordIdx = targetLineText.toLowerCase().indexOf(anchorWord.toLowerCase());
                 if (wordIdx !== -1) {
@@ -303,12 +285,24 @@ async function syncQmdToTyp(qmdUri: vscode.Uri, cursor: vscode.Position, viewCol
             const startPos = new vscode.Position(globalBestLine, startCol);
             const cursorPos = new vscode.Position(globalBestLine, endCol);
             
+            const typEditor = await vscode.window.showTextDocument(typDoc, { preserveFocus: true });
+
             typEditor.selection = new vscode.Selection(cursorPos, cursorPos);
-            typEditor.revealRange(
-                new vscode.Range(cursorPos, cursorPos), 
-                vscode.TextEditorRevealType.InCenter
-            );
+            typEditor.revealRange(new vscode.Range(cursorPos, cursorPos), vscode.TextEditorRevealType.InCenter);
             
+            // CRITICAL WORKAROUND: THE SPACE HACK
+            // Tinymist relies on file modifications to trigger the PDF scroll. 
+            // By programmatically inserting and immediately deleting a space at the exact coordinate,
+            // we force a file-change event that wakes up the Typst compiler and scrolls the preview.
+            const insertEdit = new vscode.WorkspaceEdit();
+            insertEdit.insert(typUri, cursorPos, ' ');
+            await vscode.workspace.applyEdit(insertEdit);
+            
+            const deleteEdit = new vscode.WorkspaceEdit();
+            deleteEdit.delete(typUri, new vscode.Range(cursorPos, cursorPos.translate(0, 1)));
+            await vscode.workspace.applyEdit(deleteEdit);
+            await typDoc.save();
+
             const anchorRange = new vscode.Range(startPos, cursorPos);
             const cursorDecoration = vscode.window.createTextEditorDecorationType({
                 backgroundColor: 'rgba(255, 0, 0, 0.2)',
@@ -322,12 +316,23 @@ async function syncQmdToTyp(qmdUri: vscode.Uri, cursor: vscode.Position, viewCol
             typEditor.setDecorations(cursorDecoration, [anchorRange]);
             setTimeout(() => cursorDecoration.dispose(), 1200);
 
-            // THE TINYMIST TRICK: Jiggle the cursor to simulate a human click
+            // CRITICAL WORKAROUND: THE JIGGLE
+            // Sometimes VS Code bypasses UI selection events when moving the cursor via API.
+            // This jiggle fires a genuine hardware-level event to ensure Tinymist catches it.
             setTimeout(async () => {
                 await vscode.commands.executeCommand('cursorMove', { to: 'right', by: 'character', value: 1 });
                 await vscode.commands.executeCommand('cursorMove', { to: 'left', by: 'character', value: 1 });
+                
+                // CONDITIONAL FOCUS RETURN
+                // If this was triggered by a Render, steal focus back to QMD. 
+                // If triggered by the Eye Button, leave the user in the TYP file!
+                if (returnFocus) {
+                    await vscode.window.showTextDocument(qmdDoc, {
+                        viewColumn: viewCol || vscode.ViewColumn.One,
+                        preserveFocus: false
+                    });
+                }
             }, 50);
-            
         }
     } catch (e) { console.error(e); }
 }
@@ -340,8 +345,8 @@ async function jumpToQmd(typEditor: vscode.TextEditor, mainQmdPath: string) {
     const wordRange = typDoc.getWordRangeAtPosition(cursorPosition);
     const anchorWord = wordRange ? typDoc.getText(wordRange) : "";
 
+    // CRITICAL: 300-Character Context Window (Reverse Direction)
     const cursorOffset = typDoc.offsetAt(cursorPosition);
-    
     const textAround = typDoc.getText(new vscode.Range(
         typDoc.positionAt(Math.max(0, cursorOffset - 300)),
         typDoc.positionAt(cursorOffset + 300)
@@ -351,12 +356,8 @@ async function jumpToQmd(typEditor: vscode.TextEditor, mainQmdPath: string) {
     if (allWords.length === 0) return;
 
     const midIndex = Math.floor(allWords.length / 2);
-    
-    const searchWords = allWords.slice(Math.max(0, midIndex - 6), midIndex + 6)
-                                .map(w => w.toLowerCase());
-                                
-    const contextWords = allWords.slice(Math.max(0, midIndex - 15), midIndex + 15)
-                                 .map(w => w.toLowerCase());
+    const searchWords = allWords.slice(Math.max(0, midIndex - 6), midIndex + 6).map(w => w.toLowerCase());
+    const contextWords = allWords.slice(Math.max(0, midIndex - 15), midIndex + 15).map(w => w.toLowerCase());
 
     const qmdFilesToSearch = getAllRelatedQmdFiles(mainQmdPath);
     let globalBestFile = '';
@@ -370,13 +371,10 @@ async function jumpToQmd(typEditor: vscode.TextEditor, mainQmdPath: string) {
 
         lines.forEach((line, idx) => {
             if (line.trim().length < 3) return;
-            
             const lineLower = line.toLowerCase();
             let score = 0;
             
-            searchWords.forEach(word => {
-                if (lineLower.includes(word)) score += 1;
-            });
+            searchWords.forEach(word => { if (lineLower.includes(word)) score += 1; });
 
             if (score > (searchWords.length * 0.4)) { 
                 let surroundingQmd = "";
@@ -387,11 +385,8 @@ async function jumpToQmd(typEditor: vscode.TextEditor, mainQmdPath: string) {
                     }
                 }
                 const surroundingLower = surroundingQmd.toLowerCase();
-
                 contextWords.forEach(word => {
-                    if (!searchWords.includes(word) && surroundingLower.includes(word)) {
-                        score += 0.2; 
-                    }
+                    if (!searchWords.includes(word) && surroundingLower.includes(word)) { score += 0.2; }
                 });
             }
 
@@ -425,6 +420,9 @@ async function jumpToQmd(typEditor: vscode.TextEditor, mainQmdPath: string) {
         let startCol = 0;
         let endCol = targetLineText.length; 
 
+        // CRITICAL UX: End-of-Word Cursor Placement
+        // We find the specific word and put the cursor at `endCol` so the user 
+        // can immediately start typing after the word without moving their arrow keys.
         if (anchorWord) {
             const wordIdx = targetLineText.toLowerCase().indexOf(anchorWord.toLowerCase());
             if (wordIdx !== -1) {
