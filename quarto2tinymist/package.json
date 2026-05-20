@@ -53,16 +53,6 @@
         "icon": "$(eye)"
       }
     ],
-    "configuration": {
-      "title": "Quarto to Typst",
-      "properties": {
-        "qmd2typ.renderOnSave": {
-          "type": "boolean",
-          "default": true,
-          "description": "Auto-render to Typst on save using the Quarto background server."
-        }
-      }
-    },
     "menus": {
       "editor/title": [
         {
@@ -76,6 +66,20 @@
           "group": "navigation@2"
         }
       ]
-    }
+    },
+    "keybindings": [
+      {
+        "command": "qmd2typ.preview",
+        "key": "ctrl+shift+r",
+        "mac": "cmd+shift+r",
+        "when": "editorTextFocus && resourceExtname == .qmd"
+      },
+      {
+        "command": "qmd2typ.forwardSync",
+        "key": "ctrl+shift+j",
+        "mac": "cmd+shift+j",
+        "when": "editorTextFocus && resourceExtname == .qmd"
+      }
+    ]
   }
 }

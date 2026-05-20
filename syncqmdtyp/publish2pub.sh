@@ -17,7 +17,6 @@ else
     echo " -> Warning: .vsix file not found, skipping GitHub upload."
 fi
 
-echo "Done! Please restart or reload Positron."
 
 # # 7. Publish to VS Code Marketplace
 # echo "Publishing to VS Code Marketplace..."

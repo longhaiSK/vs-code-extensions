@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
-import { spawn, ChildProcess } from 'child_process'; 
+import { spawn } from 'child_process'; 
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -9,11 +9,6 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 let isSyncing = false; 
 let isWebviewActive = false; 
 let lastActiveQmd: string | undefined;
-let renderOnSave = true; // Default preference for the checkbox
-
-// Background Server State
-let currentQuartoProcess: ChildProcess | undefined;
-let currentPreviewFile: string | undefined;
 
 // --- TERMINAL SETUP ---
 let renderTerminal: vscode.Terminal | undefined;
@@ -28,11 +23,6 @@ function getRenderTerminal() {
             close: () => {
                 renderTerminal = undefined;
                 terminalEmitter = undefined;
-                if (currentQuartoProcess) {
-                    currentQuartoProcess.kill();
-                    currentQuartoProcess = undefined;
-                    currentPreviewFile = undefined;
-                }
             }
         };
         renderTerminal = vscode.window.createTerminal({ name: "Quarto -> Typst", pty });
@@ -42,29 +32,7 @@ function getRenderTerminal() {
 
 export function activate(context: vscode.ExtensionContext) {
 
-    // 1. Tell Positron the initial state so the checkbox starts checked
-    vscode.commands.executeCommand('setContext', 'qmd2typ.isRenderOnSave', renderOnSave);
-
-    // COMMAND: Toggle Render Mode (Fired when user clicks the checkbox in the title menu)
-    let toggleCommand = vscode.commands.registerCommand('qmd2typ.toggleRenderOnSave', () => {
-        // Flip the boolean
-        renderOnSave = !renderOnSave;
-        
-        // Tell Positron to update the checkbox UI
-        vscode.commands.executeCommand('setContext', 'qmd2typ.isRenderOnSave', renderOnSave);
-        
-        // If the user unchecked the box, kill any running background server immediately
-        if (!renderOnSave && currentQuartoProcess) {
-            currentQuartoProcess.kill();
-            currentQuartoProcess = undefined;
-            currentPreviewFile = undefined;
-            if (terminalEmitter) {
-                terminalEmitter.fire(`\r\n\x1b[1;33m🛑 Auto-render disabled. Background server stopped.\x1b[0m\r\n`);
-            }
-        }
-    });
-
-    // COMMAND: Preview/Play
+    // COMMAND: Manual Preview/Play
     let previewCommand = vscode.commands.registerCommand('qmd2typ.preview', async () => {
         const editor = vscode.window.activeTextEditor;
         if (editor && editor.document.languageId === 'quarto') {
@@ -81,7 +49,7 @@ export function activate(context: vscode.ExtensionContext) {
 
         isSyncing = true; 
         try {
-            await syncQmdToTyp(qmdEditor.document.uri, qmdEditor.selection.active.line, qmdEditor.viewColumn);
+            await syncQmdToTyp(qmdEditor.document.uri, qmdEditor.selection.active, qmdEditor.viewColumn);
         } finally {
             isSyncing = false;
         }
@@ -141,154 +109,72 @@ export function activate(context: vscode.ExtensionContext) {
         }
     });
 
-    context.subscriptions.push(toggleCommand, previewCommand, forwardSync, autoSync);
+    context.subscriptions.push(previewCommand, forwardSync, autoSync);
 }
 
-// --- UNIFIED RENDER ENGINE ---
+// --- PURE MANUAL RENDER ENGINE ---
 
 async function executeQuartoRender(doc: vscode.TextDocument) {
     const qmdPath = doc.fileName;
     const workspaceFolder = path.dirname(qmdPath);
     const typPath = qmdPath.replace('.qmd', '.typ');
 
-    if (renderOnSave) {
-        // ==========================================
-        // MODE: BACKGROUND SERVER (AUTO-RENDER)
-        // ==========================================
-        if (currentQuartoProcess) {
-            if (currentPreviewFile === qmdPath) return; // Already running
-            currentQuartoProcess.kill();
-            currentQuartoProcess = undefined;
-        }
+    const args = ['render', qmdPath, '--to', 'typst', '--cache', '-M', 'output-ext:typ', '-M', 'keep-typ:true'];
 
-        currentPreviewFile = qmdPath;
-        const args = ['preview', qmdPath, '--to', 'typst', '--no-browser', '-M', 'output-ext:typ', '-M', 'keep-typ:true'];
+    const { terminal, emitter } = getRenderTerminal();
+    terminal.show(true); 
+    emitter.fire('\x1b[2J\x1b[3J\x1b[H'); 
+    emitter.fire(`\x1b[1;34m🚀 [Rendering] ${path.basename(qmdPath)}...\x1b[0m\r\n\r\n`);
 
-        const { terminal, emitter } = getRenderTerminal();
-        terminal.show(true); 
-        emitter.fire('\x1b[2J\x1b[3J\x1b[H'); 
-        emitter.fire(`\x1b[1;34m🚀 [Starting] Quarto Auto-Render Server for ${path.basename(qmdPath)}...\x1b[0m\r\n\r\n`);
+    const quartoProcess = spawn('quarto', args, { cwd: workspaceFolder });
+    let hasError = false;
 
-        currentQuartoProcess = spawn('quarto', args, { cwd: workspaceFolder });
-        let hasError = false;
-        let refreshDebounce: NodeJS.Timeout | undefined;
+    const processOutput = (data: Buffer) => {
+        const rawText = data.toString();
+        const cleanText = rawText.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
+        if (/error:|failed|exception/i.test(cleanText)) hasError = true;
+        emitter.fire(rawText.replace(/\r?\n/g, '\r\n'));
+    };
 
-        const triggerRefreshAndJump = () => {
-            if (refreshDebounce) clearTimeout(refreshDebounce);
-            refreshDebounce = setTimeout(async () => {
-                if (hasError) return;
-                try {
-                    const typUri = vscode.Uri.file(typPath);
-                    const typDoc = await vscode.workspace.openTextDocument(typUri);
-                    await vscode.window.showTextDocument(typDoc, { preserveFocus: true, preview: false });
-                    await vscode.commands.executeCommand('workbench.action.files.revert', typUri);
-                    const edit = new vscode.WorkspaceEdit();
-                    const position = typDoc.lineAt(typDoc.lineCount - 1).range.end;
-                    edit.insert(typUri, position, ' ');
-                    await vscode.workspace.applyEdit(edit);
-                    const editUndo = new vscode.WorkspaceEdit();
-                    editUndo.delete(typUri, new vscode.Range(position, position.translate(0, 1)));
-                    await vscode.workspace.applyEdit(editUndo);
-                    await typDoc.save(); 
-                } catch (e) { }
+    quartoProcess.stdout?.on('data', processOutput);
+    quartoProcess.stderr?.on('data', processOutput);
 
+    quartoProcess.on('close', async (code) => {
+        emitter.fire('\r\n--------------------------------------------------\r\n');
+        if (code === 0 && !hasError) {
+            emitter.fire(`\x1b[1;32m🎉 [Success] .typ file successfully updated.\x1b[0m\r\n`);
+            
+            try {
+                const typUri = vscode.Uri.file(typPath);
+                const typDoc = await vscode.workspace.openTextDocument(typUri);
+                await vscode.window.showTextDocument(typDoc, { preserveFocus: true, preview: false });
+                await vscode.commands.executeCommand('workbench.action.files.revert', typUri);
+                const edit = new vscode.WorkspaceEdit();
+                const position = typDoc.lineAt(typDoc.lineCount - 1).range.end;
+                edit.insert(typUri, position, ' ');
+                await vscode.workspace.applyEdit(edit);
+                const editUndo = new vscode.WorkspaceEdit();
+                editUndo.delete(typUri, new vscode.Range(position, position.translate(0, 1)));
+                await vscode.workspace.applyEdit(editUndo);
+                await typDoc.save(); 
+            } catch (e) {
+                emitter.fire(`\x1b[1;33m⚠️ [Warning] Could not refresh .typ file: ${e}\x1b[0m\r\n`);
+            }
+
+            isSyncing = true;
+            try {
                 const activeEditor = vscode.window.activeTextEditor;
                 if (activeEditor && activeEditor.document.fileName === qmdPath) {
-                    isSyncing = true;
-                    try {
-                        await syncQmdToTyp(activeEditor.document.uri, activeEditor.selection.active.line, activeEditor.viewColumn);
-                    } finally { isSyncing = false; }
+                    await syncQmdToTyp(activeEditor.document.uri, activeEditor.selection.active, activeEditor.viewColumn);
                 }
-            }, 200);
-        };
-
-        const processOutput = (data: Buffer) => {
-            const rawText = data.toString();
-            const cleanText = rawText.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
-            if (/error:|failed|exception/i.test(cleanText)) hasError = true;
-            if (cleanText.includes('Output created:')) {
-                hasError = false; 
-                triggerRefreshAndJump();
-                emitter.fire(`\x1b[1;32m🎉 [Success] Output updated.\x1b[0m\r\n`);
+            } finally {
+                isSyncing = false;
             }
-            emitter.fire(rawText.replace(/\r?\n/g, '\r\n'));
-        };
-
-        currentQuartoProcess.stdout?.on('data', processOutput);
-        currentQuartoProcess.stderr?.on('data', processOutput);
-        currentQuartoProcess.on('close', (code) => {
-            currentQuartoProcess = undefined;
-            currentPreviewFile = undefined;
-            if (terminalEmitter) emitter.fire(`\r\n\x1b[1;31m🛑 [Stopped] Server stopped (Exit Code: ${code}).\x1b[0m\r\n`);
-        });
-
-    } else {
-        // ==========================================
-        // MODE: ONE-SHOT (MANUAL RENDER)
-        // ==========================================
-        if (currentQuartoProcess) {
-            currentQuartoProcess.kill();
-            currentQuartoProcess = undefined;
-            currentPreviewFile = undefined;
+        } else {
+            const finalCode = code !== 0 ? code : 'Caught by log parser';
+            emitter.fire(`\x1b[1;31m🔥 [Error] Render failed (Exit Code: ${finalCode}).\x1b[0m\r\n`);
         }
-
-        const args = ['render', qmdPath, '--to', 'typst', '--cache', '-M', 'output-ext:typ', '-M', 'keep-typ:true'];
-
-        const { terminal, emitter } = getRenderTerminal();
-        terminal.show(true); 
-        emitter.fire('\x1b[2J\x1b[3J\x1b[H'); 
-        emitter.fire(`\x1b[1;34m🚀 [Rendering] ${path.basename(qmdPath)} (Manual Mode)...\x1b[0m\r\n\r\n`);
-
-        const quartoProcess = spawn('quarto', args, { cwd: workspaceFolder });
-        let hasError = false;
-
-        const processOutput = (data: Buffer) => {
-            const rawText = data.toString();
-            const cleanText = rawText.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
-            if (/error:|failed|exception/i.test(cleanText)) hasError = true;
-            emitter.fire(rawText.replace(/\r?\n/g, '\r\n'));
-        };
-
-        quartoProcess.stdout?.on('data', processOutput);
-        quartoProcess.stderr?.on('data', processOutput);
-
-        quartoProcess.on('close', async (code) => {
-            emitter.fire('\r\n--------------------------------------------------\r\n');
-            if (code === 0 && !hasError) {
-                emitter.fire(`\x1b[1;32m🎉 [Success] .typ file successfully updated.\x1b[0m\r\n`);
-                
-                try {
-                    const typUri = vscode.Uri.file(typPath);
-                    const typDoc = await vscode.workspace.openTextDocument(typUri);
-                    await vscode.window.showTextDocument(typDoc, { preserveFocus: true, preview: false });
-                    await vscode.commands.executeCommand('workbench.action.files.revert', typUri);
-                    const edit = new vscode.WorkspaceEdit();
-                    const position = typDoc.lineAt(typDoc.lineCount - 1).range.end;
-                    edit.insert(typUri, position, ' ');
-                    await vscode.workspace.applyEdit(edit);
-                    const editUndo = new vscode.WorkspaceEdit();
-                    editUndo.delete(typUri, new vscode.Range(position, position.translate(0, 1)));
-                    await vscode.workspace.applyEdit(editUndo);
-                    await typDoc.save(); 
-                } catch (e) {
-                    emitter.fire(`\x1b[1;33m⚠️ [Warning] Could not refresh .typ file: ${e}\x1b[0m\r\n`);
-                }
-
-                isSyncing = true;
-                try {
-                    const activeEditor = vscode.window.activeTextEditor;
-                    if (activeEditor && activeEditor.document.fileName === qmdPath) {
-                        await syncQmdToTyp(activeEditor.document.uri, activeEditor.selection.active.line, activeEditor.viewColumn);
-                    }
-                } finally {
-                    isSyncing = false;
-                }
-            } else {
-                const finalCode = code !== 0 ? code : 'Caught by log parser';
-                emitter.fire(`\x1b[1;31m🔥 [Error] Render failed (Exit Code: ${finalCode}).\x1b[0m\r\n`);
-            }
-        });
-    }
+    });
 }
 
 // --- HELPER: Find all included .qmd files recursively ---
@@ -319,7 +205,7 @@ function getAllRelatedQmdFiles(mainQmdPath: string): string[] {
 
 // --- SYNC & JUMP FUNCTIONS ---
 
-async function syncQmdToTyp(qmdUri: vscode.Uri, lineIdx: number, viewCol?: vscode.ViewColumn) {
+async function syncQmdToTyp(qmdUri: vscode.Uri, cursor: vscode.Position, viewCol?: vscode.ViewColumn) {
     const qmdPath = qmdUri.fsPath;
     const typPath = qmdPath.replace('.qmd', '.typ');
     if (!fs.existsSync(typPath)) return;
@@ -333,7 +219,10 @@ async function syncQmdToTyp(qmdUri: vscode.Uri, lineIdx: number, viewCol?: vscod
         });
 
         const qmdDoc = await vscode.workspace.openTextDocument(qmdUri);
-        const qmdLineText = qmdDoc.lineAt(lineIdx).text.trim();
+        const qmdLineText = qmdDoc.lineAt(cursor.line).text.trim();
+        
+        const wordRange = qmdDoc.getWordRangeAtPosition(cursor);
+        const anchorWord = wordRange ? qmdDoc.getText(wordRange) : "";
         
         if (qmdLineText.length > 0) {
             const searchWords = new Set(qmdLineText.toLowerCase().match(/\b\w{4,}\b/g) || []);
@@ -350,16 +239,55 @@ async function syncQmdToTyp(qmdUri: vscode.Uri, lineIdx: number, viewCol?: vscod
                 });
 
                 if (bestMatch !== -1) {
-                    const pos = new vscode.Position(bestMatch, 0);
-                    typEditor.selection = new vscode.Selection(pos, pos);
-                    typEditor.revealRange(new vscode.Range(pos, pos), vscode.TextEditorRevealType.InCenter);
+                    const targetLineText = typLines[bestMatch];
+                    let endCol = targetLineText.length; 
+                    let startCol = 0;
+
+                    if (anchorWord) {
+                        const wordIdx = targetLineText.toLowerCase().indexOf(anchorWord.toLowerCase());
+                        if (wordIdx !== -1) {
+                            startCol = wordIdx;
+                            endCol = wordIdx + anchorWord.length;
+                        } else {
+                            let lastWordIndex = -1;
+                            let lastWordLength = 0;
+                            searchWords.forEach(w => {
+                                const idx = targetLineText.toLowerCase().indexOf(w);
+                                if (idx > lastWordIndex) {
+                                    lastWordIndex = idx;
+                                    lastWordLength = w.length;
+                                }
+                            });
+                            if (lastWordIndex !== -1) {
+                                startCol = lastWordIndex;
+                                endCol = lastWordIndex + lastWordLength;
+                            }
+                        }
+                    }
+
+                    const cursorPos = new vscode.Position(bestMatch, endCol);
+                    const startPos = new vscode.Position(bestMatch, startCol);
+                    
+                    typEditor.selection = new vscode.Selection(cursorPos, cursorPos);
+                    typEditor.revealRange(new vscode.Range(cursorPos, cursorPos), vscode.TextEditorRevealType.InCenter);
+                    
+                    const anchorRange = new vscode.Range(startPos, cursorPos);
+                    const cursorDecoration = vscode.window.createTextEditorDecorationType({
+                        backgroundColor: 'rgba(255, 0, 0, 0.2)',
+                        border: '1px solid rgba(255, 0, 0, 0.8)',
+                        borderRadius: '2px',
+                        overviewRulerColor: 'red',
+                        overviewRulerLane: vscode.OverviewRulerLane.Full,
+                        fontWeight: 'bold'
+                    });
+
+                    typEditor.setDecorations(cursorDecoration, [anchorRange]);
+                    setTimeout(() => cursorDecoration.dispose(), 1200);
                 }
             }
         }
     } catch (e) { console.error(e); }
 }
-
-// --- SYNC & JUMP FUNCTIONS ---
 
 async function jumpToQmd(typEditor: vscode.TextEditor, mainQmdPath: string) {
     const typDoc = typEditor.document;
@@ -446,16 +374,15 @@ async function jumpToQmd(typEditor: vscode.TextEditor, mainQmdPath: string) {
 
         targetEditor = await vscode.window.showTextDocument(qmdDoc, {
             viewColumn: targetEditor ? targetEditor.viewColumn : vscode.ViewColumn.One,
-            preserveFocus: false, // Forces focus onto the editor
+            preserveFocus: false,
             preview: false 
         });
 
         const targetLineText = qmdDoc.lineAt(globalBestLine).text;
         let startCol = 0;
-        let endCol = targetLineText.length; // Default to end of line if word isn't found
+        let endCol = targetLineText.length; 
 
         if (anchorWord) {
-            // Find exactly where the word is in the target line
             const wordIdx = targetLineText.toLowerCase().indexOf(anchorWord.toLowerCase());
             if (wordIdx !== -1) {
                 startCol = wordIdx;
@@ -463,17 +390,13 @@ async function jumpToQmd(typEditor: vscode.TextEditor, mainQmdPath: string) {
             }
         }
 
-        // Place the cursor exactly after the word
         const startPos = new vscode.Position(globalBestLine, startCol);
         const cursorPos = new vscode.Position(globalBestLine, endCol);
         
         const anchorRange = qmdDoc.getWordRangeAtPosition(startPos) || 
                             new vscode.Range(startPos, new vscode.Position(globalBestLine, startCol + Math.max(1, anchorWord.length)));
         
-        // This moves the blinking cursor
         targetEditor.selection = new vscode.Selection(cursorPos, cursorPos);
-        
-        // This scrolls the window
         targetEditor.revealRange(
             new vscode.Range(cursorPos, cursorPos), 
             vscode.TextEditorRevealType.InCenter
@@ -506,8 +429,4 @@ async function jumpToQmd(typEditor: vscode.TextEditor, mainQmdPath: string) {
     }
 }
 
-export function deactivate() {
-    if (currentQuartoProcess) {
-        currentQuartoProcess.kill();
-    }
-}
+export function deactivate() {}
