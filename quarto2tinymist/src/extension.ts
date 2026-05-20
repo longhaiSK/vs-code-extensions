@@ -219,72 +219,115 @@ async function syncQmdToTyp(qmdUri: vscode.Uri, cursor: vscode.Position, viewCol
         });
 
         const qmdDoc = await vscode.workspace.openTextDocument(qmdUri);
-        const qmdLineText = qmdDoc.lineAt(cursor.line).text.trim();
         
-        const wordRange = qmdDoc.getWordRangeAtPosition(cursor);
-        const anchorWord = wordRange ? qmdDoc.getText(wordRange) : "";
+        // Grab word at cursor, or fallback to the next word on the line
+        let wordRange = qmdDoc.getWordRangeAtPosition(cursor);
+        let anchorWord = wordRange ? qmdDoc.getText(wordRange) : "";
+
+        if (!anchorWord) {
+            const lineText = qmdDoc.lineAt(cursor.line).text;
+            const textAfterCursor = lineText.substring(cursor.character);
+            const match = textAfterCursor.match(/\b\w{2,}\b/);
+            if (match) {
+                anchorWord = match[0];
+            }
+        }
+
+        const cursorOffset = qmdDoc.offsetAt(cursor);
+        const textAround = qmdDoc.getText(new vscode.Range(
+            qmdDoc.positionAt(Math.max(0, cursorOffset - 300)),
+            qmdDoc.positionAt(cursorOffset + 300)
+        ));
+
+        const allWords = textAround.match(/\b\w{3,}\b/g) || [];
+        if (allWords.length === 0) return;
+
+        const midIndex = Math.floor(allWords.length / 2);
         
-        if (qmdLineText.length > 0) {
-            const searchWords = new Set(qmdLineText.toLowerCase().match(/\b\w{4,}\b/g) || []);
-            if (searchWords.size > 0) {
-                const typLines = typDoc.getText().split(/\r?\n/);
-                let bestMatch = -1;
-                let highStore = 0;
+        const searchWords = allWords.slice(Math.max(0, midIndex - 6), midIndex + 6)
+                                    .map(w => w.toLowerCase());
+                                    
+        const contextWords = allWords.slice(Math.max(0, midIndex - 15), midIndex + 15)
+                                     .map(w => w.toLowerCase());
 
-                typLines.forEach((line, idx) => {
-                    const words = new Set(line.toLowerCase().match(/\b\w{4,}\b/g) || []);
-                    let score = 0;
-                    searchWords.forEach(w => { if (words.has(w)) score++; });
-                    if (score > highStore) { highStore = score; bestMatch = idx; }
-                });
+        const typLines = typDoc.getText().split(/\r?\n/);
+        let globalBestLine = -1;
+        let globalHighScore = 0;
 
-                if (bestMatch !== -1) {
-                    const targetLineText = typLines[bestMatch];
-                    let endCol = targetLineText.length; 
-                    let startCol = 0;
+        typLines.forEach((line, idx) => {
+            if (line.trim().length < 3) return;
+            
+            const lineLower = line.toLowerCase();
+            let score = 0;
+            
+            searchWords.forEach(word => {
+                if (lineLower.includes(word)) score += 1;
+            });
 
-                    if (anchorWord) {
-                        const wordIdx = targetLineText.toLowerCase().indexOf(anchorWord.toLowerCase());
-                        if (wordIdx !== -1) {
-                            startCol = wordIdx;
-                            endCol = wordIdx + anchorWord.length;
-                        } else {
-                            let lastWordIndex = -1;
-                            let lastWordLength = 0;
-                            searchWords.forEach(w => {
-                                const idx = targetLineText.toLowerCase().indexOf(w);
-                                if (idx > lastWordIndex) {
-                                    lastWordIndex = idx;
-                                    lastWordLength = w.length;
-                                }
-                            });
-                            if (lastWordIndex !== -1) {
-                                startCol = lastWordIndex;
-                                endCol = lastWordIndex + lastWordLength;
-                            }
-                        }
+            if (score > (searchWords.length * 0.4)) { 
+                let surroundingTyp = "";
+                for (let offset = -2; offset <= 2; offset++) {
+                    const targetIdx = idx + offset;
+                    if (offset !== 0 && targetIdx >= 0 && targetIdx < typLines.length) {
+                        surroundingTyp += typLines[targetIdx] + " ";
                     }
+                }
+                const surroundingLower = surroundingTyp.toLowerCase();
 
-                    const cursorPos = new vscode.Position(bestMatch, endCol);
-                    const startPos = new vscode.Position(bestMatch, startCol);
-                    
-                    typEditor.selection = new vscode.Selection(cursorPos, cursorPos);
-                    typEditor.revealRange(new vscode.Range(cursorPos, cursorPos), vscode.TextEditorRevealType.InCenter);
-                    
-                    const anchorRange = new vscode.Range(startPos, cursorPos);
-                    const cursorDecoration = vscode.window.createTextEditorDecorationType({
-                        backgroundColor: 'rgba(255, 0, 0, 0.2)',
-                        border: '1px solid rgba(255, 0, 0, 0.8)',
-                        borderRadius: '2px',
-                        overviewRulerColor: 'red',
-                        overviewRulerLane: vscode.OverviewRulerLane.Full,
-                        fontWeight: 'bold'
-                    });
+                contextWords.forEach(word => {
+                    if (!searchWords.includes(word) && surroundingLower.includes(word)) {
+                        score += 0.2; 
+                    }
+                });
+            }
 
-                    typEditor.setDecorations(cursorDecoration, [anchorRange]);
-                    setTimeout(() => cursorDecoration.dispose(), 1200);
+            if (score > globalHighScore) { 
+                globalHighScore = score; 
+                globalBestLine = idx; 
+            }
+        });
+
+        if (globalBestLine !== -1 && globalHighScore > 1) {
+            const targetLineText = typLines[globalBestLine];
+            let startCol = 0;
+            let endCol = targetLineText.length; 
+
+            if (anchorWord) {
+                const wordIdx = targetLineText.toLowerCase().indexOf(anchorWord.toLowerCase());
+                if (wordIdx !== -1) {
+                    startCol = wordIdx;
+                    endCol = wordIdx + anchorWord.length; 
                 }
             }
+
+            const startPos = new vscode.Position(globalBestLine, startCol);
+            const cursorPos = new vscode.Position(globalBestLine, endCol);
+            
+            typEditor.selection = new vscode.Selection(cursorPos, cursorPos);
+            typEditor.revealRange(
+                new vscode.Range(cursorPos, cursorPos), 
+                vscode.TextEditorRevealType.InCenter
+            );
+            
+            const anchorRange = new vscode.Range(startPos, cursorPos);
+            const cursorDecoration = vscode.window.createTextEditorDecorationType({
+                backgroundColor: 'rgba(255, 0, 0, 0.2)',
+                border: '1px solid rgba(255, 0, 0, 0.8)',
+                borderRadius: '2px',
+                overviewRulerColor: 'red',
+                overviewRulerLane: vscode.OverviewRulerLane.Full,
+                fontWeight: 'bold'
+            });
+
+            typEditor.setDecorations(cursorDecoration, [anchorRange]);
+            setTimeout(() => cursorDecoration.dispose(), 1200);
+
+            // THE TINYMIST TRICK: Jiggle the cursor to simulate a human click
+            setTimeout(async () => {
+                await vscode.commands.executeCommand('cursorMove', { to: 'right', by: 'character', value: 1 });
+                await vscode.commands.executeCommand('cursorMove', { to: 'left', by: 'character', value: 1 });
+            }, 50);
+            
         }
     } catch (e) { console.error(e); }
 }
