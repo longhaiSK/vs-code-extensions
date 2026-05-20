@@ -44,19 +44,24 @@
     "commands": [
       {
         "command": "qmd2typ.preview",
-        "title": "Render Quarto to Typst",
-        "icon": "$(play)"
+        "title": "Render Quarto to Typst"
       },
       {
         "command": "qmd2typ.forwardSync",
         "title": "Forward Sync to Typst",
         "icon": "$(eye)"
-      },
-      {
-        "command": "qmd2typ.toggleRenderOnSave",
-        "title": "Typst on Save"
       }
     ],
+    "configuration": {
+      "title": "Quarto to Typst",
+      "properties": {
+        "qmd2typ.renderOnSave": {
+          "type": "boolean",
+          "default": true,
+          "description": "Auto-render to Typst on save using the Quarto background server."
+        }
+      }
+    },
     "keybindings": [
       {
         "command": "qmd2typ.preview",

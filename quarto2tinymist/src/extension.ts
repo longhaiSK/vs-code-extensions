@@ -9,14 +9,10 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 let isSyncing = false; 
 let isWebviewActive = false; 
 let lastActiveQmd: string | undefined;
-let renderOnSave = true; // Default to auto-render
 
 // Background Server State
 let currentQuartoProcess: ChildProcess | undefined;
 let currentPreviewFile: string | undefined;
-
-// UI State
-let statusBarItem: vscode.StatusBarItem;
 
 // --- TERMINAL SETUP ---
 let renderTerminal: vscode.Terminal | undefined;
@@ -43,37 +39,21 @@ function getRenderTerminal() {
     return { terminal: renderTerminal, emitter: terminalEmitter };
 }
 
-function updateStatusBar() {
-    if (renderOnSave) {
-        statusBarItem.text = '$(check-all) Auto-Render';
-        statusBarItem.tooltip = 'Quarto background server is ON. Automatically renders on save. Click to disable.';
-    } else {
-        statusBarItem.text = '$(play-circle) Manual Render';
-        statusBarItem.tooltip = 'Auto-render is OFF. Will only render when you hit Play. Click to enable.';
-    }
-    statusBarItem.show();
-}
-
 export function activate(context: vscode.ExtensionContext) {
 
-    // STATUS BAR UI
-    statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
-    statusBarItem.command = 'qmd2typ.toggleRenderOnSave';
-    updateStatusBar();
-    context.subscriptions.push(statusBarItem);
-
-    // COMMAND: Toggle Render Mode
-    let toggleCommand = vscode.commands.registerCommand('qmd2typ.toggleRenderOnSave', () => {
-        renderOnSave = !renderOnSave;
-        updateStatusBar();
-        
-        // If disabled while a server is running, kill the background server immediately
-        if (!renderOnSave && currentQuartoProcess) {
-            currentQuartoProcess.kill();
-            currentQuartoProcess = undefined;
-            currentPreviewFile = undefined;
-            if (terminalEmitter) {
-                terminalEmitter.fire(`\r\n\x1b[1;33m🛑 Auto-render disabled. Background server stopped.\x1b[0m\r\n`);
+    // Listen for the user clicking the Checkbox in Positron Settings
+    let configListener = vscode.workspace.onDidChangeConfiguration(e => {
+        if (e.affectsConfiguration('qmd2typ.renderOnSave')) {
+            const renderOnSave = vscode.workspace.getConfiguration('qmd2typ').get<boolean>('renderOnSave', true);
+            
+            // If the user unchecked the box, kill any running background server immediately
+            if (!renderOnSave && currentQuartoProcess) {
+                currentQuartoProcess.kill();
+                currentQuartoProcess = undefined;
+                currentPreviewFile = undefined;
+                if (terminalEmitter) {
+                    terminalEmitter.fire(`\r\n\x1b[1;33m🛑 Auto-render disabled via Settings. Background server stopped.\x1b[0m\r\n`);
+                }
             }
         }
     });
@@ -155,7 +135,7 @@ export function activate(context: vscode.ExtensionContext) {
         }
     });
 
-    context.subscriptions.push(toggleCommand, previewCommand, forwardSync, autoSync);
+    context.subscriptions.push(configListener, previewCommand, forwardSync, autoSync);
 }
 
 // --- UNIFIED RENDER ENGINE ---
@@ -164,6 +144,9 @@ async function executeQuartoRender(doc: vscode.TextDocument) {
     const qmdPath = doc.fileName;
     const workspaceFolder = path.dirname(qmdPath);
     const typPath = qmdPath.replace('.qmd', '.typ');
+
+    // Read the checkbox setting directly from Positron
+    const renderOnSave = vscode.workspace.getConfiguration('qmd2typ').get<boolean>('renderOnSave', true);
 
     if (renderOnSave) {
         // ==========================================
@@ -288,7 +271,6 @@ async function executeQuartoRender(doc: vscode.TextDocument) {
                     emitter.fire(`\x1b[1;33m⚠️ [Warning] Could not refresh .typ file: ${e}\x1b[0m\r\n`);
                 }
 
-                // Jump logic
                 isSyncing = true;
                 try {
                     const activeEditor = vscode.window.activeTextEditor;
