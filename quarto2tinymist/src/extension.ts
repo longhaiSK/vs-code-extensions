@@ -56,8 +56,6 @@ export function activate(context: vscode.ExtensionContext) {
 
         isSyncing = true; 
         try {
-            // CRITICAL UX: Pass "false" for returnFocus. 
-            // The Eye button should intentionally leave the user in the .typ file!
             await syncQmdToTyp(qmdEditor.document.uri, qmdEditor.selection.active, qmdEditor.viewColumn, false);
         } finally {
             isSyncing = false;
@@ -72,9 +70,6 @@ export function activate(context: vscode.ExtensionContext) {
 
         if (isSyncing) return; 
         
-        // CRITICAL: We track if the user clicked into the Tinymist PDF Webview.
-        // If they click the PDF, editor becomes undefined. We flag it so we know 
-        // to intercept the subsequent .typ file opening.
         if (!editor) { 
             isWebviewActive = true; 
             return; 
@@ -83,17 +78,44 @@ export function activate(context: vscode.ExtensionContext) {
         const fileName = editor.document.fileName;
 
         if (fileName.endsWith('.typ')) {
+            const normalizedPath = fileName.replace(/\\/g, '/').toLowerCase();
+            const isFrameworkFile = [
+                '/_extensions/',
+                '/typst/packages/',
+                '/.local/share/typst/',
+                '/.cache/typst/',
+                '/library/application support/typst/',
+                '/appdata/local/typst/',
+                '/appdata/roaming/typst/'
+            ].some(p => normalizedPath.includes(p));
+
+            // CRITICAL UX: The Framework Assassin
+            // If Tinymist opened a system/package file, we immediately close it
+            // and throw focus back to the QMD file so the user's workflow isn't interrupted.
+            if (isFrameworkFile) {
+                if (isWebviewActive) {
+                    await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+                    if (lastActiveQmd) {
+                        const qmdDoc = await vscode.workspace.openTextDocument(lastActiveQmd);
+                        await vscode.window.showTextDocument(qmdDoc, { preserveFocus: false });
+                    }
+                }
+                isWebviewActive = false; 
+                return; 
+            }
+
             const exactQmdPath = fileName.replace('.typ', '.qmd');
             let targetQmdPath = exactQmdPath;
 
             if (!fs.existsSync(exactQmdPath) && lastActiveQmd) {
-                targetQmdPath = lastActiveQmd;
+                if (path.dirname(fileName) === path.dirname(lastActiveQmd)) {
+                    targetQmdPath = lastActiveQmd;
+                } else {
+                    targetQmdPath = ""; 
+                }
             }
 
-            // CRITICAL UX: Only jump back to QMD if the TYP file was triggered 
-            // by clicking the PDF (isWebviewActive). If the user manually clicked 
-            // the .typ file in their file explorer, we leave them alone so they can edit it!
-            if (fs.existsSync(targetQmdPath) && isWebviewActive) {
+            if (targetQmdPath !== "" && fs.existsSync(targetQmdPath) && isWebviewActive) {
                 isWebviewActive = false;
                 isSyncing = true;
                 setTimeout(async () => {
@@ -103,7 +125,6 @@ export function activate(context: vscode.ExtensionContext) {
                 }, 50);
             }
         } else {
-            // Reset flag if they clicked on something else
             isWebviewActive = false; 
         }
     });
@@ -154,8 +175,6 @@ async function executeQuartoRender(doc: vscode.TextDocument) {
             try {
                 const activeEditor = vscode.window.activeTextEditor;
                 if (activeEditor && activeEditor.document.fileName === qmdPath) {
-                    // CRITICAL UX: Pass "true" for returnFocus.
-                    // After a render finishes, the user wants to keep typing in their .qmd file.
                     await syncQmdToTyp(activeEditor.document.uri, activeEditor.selection.active, activeEditor.viewColumn, true);
                 }
             } finally {
@@ -196,7 +215,6 @@ function getAllRelatedQmdFiles(mainQmdPath: string): string[] {
 
 // --- SYNC & JUMP FUNCTIONS ---
 
-// Added `returnFocus` parameter with a default of true
 async function syncQmdToTyp(qmdUri: vscode.Uri, cursor: vscode.Position, viewCol?: vscode.ViewColumn, returnFocus: boolean = true) {
     const qmdPath = qmdUri.fsPath;
     const typPath = qmdPath.replace('.qmd', '.typ');
@@ -209,10 +227,6 @@ async function syncQmdToTyp(qmdUri: vscode.Uri, cursor: vscode.Position, viewCol
         let wordRange = qmdDoc.getWordRangeAtPosition(cursor);
         let anchorWord = wordRange ? qmdDoc.getText(wordRange) : "";
 
-        // CRITICAL UX: The Empty Space Lookahead
-        // If the user's cursor is sitting in a blank space right before a word, VS Code
-        // returns an empty string. This block scans forward on the same line to find 
-        // the very next word so the user doesn't have to highlight text to sync.
         if (!anchorWord) {
             const lineText = qmdDoc.lineAt(cursor.line).text;
             const textAfterCursor = lineText.substring(cursor.character);
@@ -222,10 +236,6 @@ async function syncQmdToTyp(qmdUri: vscode.Uri, cursor: vscode.Position, viewCol
             }
         }
 
-        // CRITICAL: 300-Character Context Window
-        // We do not just match line numbers, because Quarto alters line counts during render.
-        // We grab 300 characters around the cursor to create a highly accurate "fingerprint" 
-        // to find the exact matching line in the compiled Typst file.
         const cursorOffset = qmdDoc.offsetAt(cursor);
         const textAround = qmdDoc.getText(new vscode.Range(
             qmdDoc.positionAt(Math.max(0, cursorOffset - 300)),
@@ -273,7 +283,6 @@ async function syncQmdToTyp(qmdUri: vscode.Uri, cursor: vscode.Position, viewCol
             let startCol = 0;
             let endCol = targetLineText.length; 
 
-            // Place the cursor exactly AFTER the matched word
             if (anchorWord) {
                 const wordIdx = targetLineText.toLowerCase().indexOf(anchorWord.toLowerCase());
                 if (wordIdx !== -1) {
@@ -290,10 +299,6 @@ async function syncQmdToTyp(qmdUri: vscode.Uri, cursor: vscode.Position, viewCol
             typEditor.selection = new vscode.Selection(cursorPos, cursorPos);
             typEditor.revealRange(new vscode.Range(cursorPos, cursorPos), vscode.TextEditorRevealType.InCenter);
             
-            // CRITICAL WORKAROUND: THE SPACE HACK
-            // Tinymist relies on file modifications to trigger the PDF scroll. 
-            // By programmatically inserting and immediately deleting a space at the exact coordinate,
-            // we force a file-change event that wakes up the Typst compiler and scrolls the preview.
             const insertEdit = new vscode.WorkspaceEdit();
             insertEdit.insert(typUri, cursorPos, ' ');
             await vscode.workspace.applyEdit(insertEdit);
@@ -316,16 +321,10 @@ async function syncQmdToTyp(qmdUri: vscode.Uri, cursor: vscode.Position, viewCol
             typEditor.setDecorations(cursorDecoration, [anchorRange]);
             setTimeout(() => cursorDecoration.dispose(), 1200);
 
-            // CRITICAL WORKAROUND: THE JIGGLE
-            // Sometimes VS Code bypasses UI selection events when moving the cursor via API.
-            // This jiggle fires a genuine hardware-level event to ensure Tinymist catches it.
             setTimeout(async () => {
                 await vscode.commands.executeCommand('cursorMove', { to: 'right', by: 'character', value: 1 });
                 await vscode.commands.executeCommand('cursorMove', { to: 'left', by: 'character', value: 1 });
                 
-                // CONDITIONAL FOCUS RETURN
-                // If this was triggered by a Render, steal focus back to QMD. 
-                // If triggered by the Eye Button, leave the user in the TYP file!
                 if (returnFocus) {
                     await vscode.window.showTextDocument(qmdDoc, {
                         viewColumn: viewCol || vscode.ViewColumn.One,
@@ -345,7 +344,6 @@ async function jumpToQmd(typEditor: vscode.TextEditor, mainQmdPath: string) {
     const wordRange = typDoc.getWordRangeAtPosition(cursorPosition);
     const anchorWord = wordRange ? typDoc.getText(wordRange) : "";
 
-    // CRITICAL: 300-Character Context Window (Reverse Direction)
     const cursorOffset = typDoc.offsetAt(cursorPosition);
     const textAround = typDoc.getText(new vscode.Range(
         typDoc.positionAt(Math.max(0, cursorOffset - 300)),
@@ -399,10 +397,6 @@ async function jumpToQmd(typEditor: vscode.TextEditor, mainQmdPath: string) {
     }
 
     if (globalBestFile !== '' && globalHighScore > 1) {
-        if (typDoc.fileName !== mainQmdPath.replace('.qmd', '.typ')) {
-            await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
-        }
-
         const targetUri = vscode.Uri.file(globalBestFile);
         const qmdDoc = await vscode.workspace.openTextDocument(targetUri);
         
@@ -420,9 +414,6 @@ async function jumpToQmd(typEditor: vscode.TextEditor, mainQmdPath: string) {
         let startCol = 0;
         let endCol = targetLineText.length; 
 
-        // CRITICAL UX: End-of-Word Cursor Placement
-        // We find the specific word and put the cursor at `endCol` so the user 
-        // can immediately start typing after the word without moving their arrow keys.
         if (anchorWord) {
             const wordIdx = targetLineText.toLowerCase().indexOf(anchorWord.toLowerCase());
             if (wordIdx !== -1) {
@@ -456,10 +447,6 @@ async function jumpToQmd(typEditor: vscode.TextEditor, mainQmdPath: string) {
         setTimeout(() => cursorDecoration.dispose(), 1200);
         
     } else {
-        if (typDoc.fileName !== mainQmdPath.replace('.qmd', '.typ')) {
-            await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
-        }
-
         const fallbackUri = vscode.Uri.file(mainQmdPath);
         const qmdDoc = await vscode.workspace.openTextDocument(fallbackUri);
         await vscode.window.showTextDocument(qmdDoc, {
