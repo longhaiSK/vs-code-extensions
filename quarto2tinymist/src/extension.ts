@@ -298,15 +298,6 @@ async function syncQmdToTyp(qmdUri: vscode.Uri, cursor: vscode.Position, viewCol
 
             typEditor.selection = new vscode.Selection(cursorPos, cursorPos);
             typEditor.revealRange(new vscode.Range(cursorPos, cursorPos), vscode.TextEditorRevealType.InCenter);
-            
-            const insertEdit = new vscode.WorkspaceEdit();
-            insertEdit.insert(typUri, cursorPos, ' ');
-            await vscode.workspace.applyEdit(insertEdit);
-            
-            const deleteEdit = new vscode.WorkspaceEdit();
-            deleteEdit.delete(typUri, new vscode.Range(cursorPos, cursorPos.translate(0, 1)));
-            await vscode.workspace.applyEdit(deleteEdit);
-            await typDoc.save();
 
             const anchorRange = new vscode.Range(startPos, cursorPos);
             const cursorDecoration = vscode.window.createTextEditorDecorationType({
