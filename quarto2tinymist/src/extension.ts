@@ -134,10 +134,13 @@ export function activate(context: vscode.ExtensionContext) {
 
 // --- PURE MANUAL RENDER ENGINE ---
 
+// --- PURE MANUAL RENDER ENGINE ---
+
 async function executeQuartoRender(doc: vscode.TextDocument) {
     const qmdPath = doc.fileName;
     const workspaceFolder = path.dirname(qmdPath);
     const typPath = qmdPath.replace('.qmd', '.typ');
+    const typFileName = path.basename(typPath); // Get just the filename (e.g., 'document.typ')
 
     const args = ['render', qmdPath, '--to', 'typst', '--cache', '-M', 'output-ext:typ', '-M', 'keep-typ:true'];
 
@@ -162,13 +165,17 @@ async function executeQuartoRender(doc: vscode.TextDocument) {
     quartoProcess.on('close', async (code) => {
         emitter.fire('\r\n--------------------------------------------------\r\n');
         if (code === 0 && !hasError) {
-            emitter.fire(`\x1b[1;32m🎉 [Success] .typ file successfully updated.\x1b[0m\r\n`);
+            // Replaced the generic string with the actual filename variable
+            emitter.fire(`\x1b[1;32m🎉 [Success] ${typFileName} successfully updated.\x1b[0m\r\n`);
+            
+            emitter.fire(`\x1b[1;36m💡 [Tip] Check the "Problems" panel for any Typst syntax errors.\x1b[0m\r\n`);
             
             try {
                 const typUri = vscode.Uri.file(typPath);
                 await vscode.commands.executeCommand('workbench.action.files.revert', typUri);
             } catch (e) {
-                emitter.fire(`\x1b[1;33m⚠️ [Warning] Could not refresh .typ file: ${e}\x1b[0m\r\n`);
+                // Updated warning message as well
+                emitter.fire(`\x1b[1;33m⚠️ [Warning] Could not refresh ${typFileName}: ${e}\x1b[0m\r\n`);
             }
 
             isSyncing = true;
