@@ -16,6 +16,7 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 let isSyncing = false; 
 let isWebviewActive = false; 
 let lastActiveQmd: string | undefined;
+let awaitingTinymistJump = false;
 
 // --- TERMINAL SETUP ---
 let renderTerminal: vscode.Terminal | undefined;
@@ -62,7 +63,31 @@ export function activate(context: vscode.ExtensionContext) {
         }
     });
 
-    // AUTO-SYNC / JUMP BACK
+    // HELPER: Extracted jump logic to keep things clean
+    async function executeJumpLogic(typEditor: vscode.TextEditor) {
+        isSyncing = true;
+        const fileName = typEditor.document.fileName;
+        const exactQmdPath = fileName.replace('.typ', '.qmd');
+        let targetQmdPath = exactQmdPath;
+
+        if (!fs.existsSync(exactQmdPath) && lastActiveQmd) {
+            if (path.dirname(fileName) === path.dirname(lastActiveQmd)) {
+                targetQmdPath = lastActiveQmd;
+            } else {
+                targetQmdPath = "";
+            }
+        }
+
+        if (targetQmdPath !== "" && fs.existsSync(targetQmdPath)) {
+            try {
+                await jumpToQmd(typEditor, targetQmdPath);
+            } finally { isSyncing = false; }
+        } else {
+            isSyncing = false;
+        }
+    }
+
+    // 1. AUTO-SYNC (Handles Tab Changes & The Framework Assassin)
     let autoSync = vscode.window.onDidChangeActiveTextEditor(async (editor) => {
         if (editor && editor.document.languageId === 'quarto') {
             lastActiveQmd = editor.document.fileName;
@@ -80,18 +105,12 @@ export function activate(context: vscode.ExtensionContext) {
         if (fileName.endsWith('.typ')) {
             const normalizedPath = fileName.replace(/\\/g, '/').toLowerCase();
             const isFrameworkFile = [
-                '/_extensions/',
-                '/typst/packages/',
-                '/.local/share/typst/',
-                '/.cache/typst/',
-                '/library/application support/typst/',
-                '/appdata/local/typst/',
-                '/appdata/roaming/typst/'
+                '/_extensions/', '/typst/packages/', '/.local/share/typst/',
+                '/.cache/typst/', '/library/application support/typst/',
+                '/appdata/local/typst/', '/appdata/roaming/typst/'
             ].some(p => normalizedPath.includes(p));
 
             // CRITICAL UX: The Framework Assassin
-            // If Tinymist opened a system/package file, we immediately close it
-            // and throw focus back to the QMD file so the user's workflow isn't interrupted.
             if (isFrameworkFile) {
                 if (isWebviewActive) {
                     await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
@@ -101,38 +120,45 @@ export function activate(context: vscode.ExtensionContext) {
                     }
                 }
                 isWebviewActive = false; 
+                awaitingTinymistJump = false;
                 return; 
             }
 
-            const exactQmdPath = fileName.replace('.typ', '.qmd');
-            let targetQmdPath = exactQmdPath;
-
-            if (!fs.existsSync(exactQmdPath) && lastActiveQmd) {
-                if (path.dirname(fileName) === path.dirname(lastActiveQmd)) {
-                    targetQmdPath = lastActiveQmd;
-                } else {
-                    targetQmdPath = ""; 
-                }
-            }
-
-            if (targetQmdPath !== "" && fs.existsSync(targetQmdPath) && isWebviewActive) {
+            // If we came from the PDF webview, DO NOT jump yet. 
+            // Arm the listener to wait for Tinymist's cursor movement.
+            if (isWebviewActive) {
                 isWebviewActive = false;
-                isSyncing = true;
-                setTimeout(async () => {
-                    try {
-                        await jumpToQmd(editor, targetQmdPath);
-                    } finally { isSyncing = false; }
-                }, 50);
+                awaitingTinymistJump = true;
+
+                // Fallback: If Tinymist opens the .typ file but the cursor was ALREADY
+                // in the exact right spot, a selection change event will never fire. 
+                setTimeout(() => {
+                    if (awaitingTinymistJump) {
+                        awaitingTinymistJump = false;
+                        executeJumpLogic(editor);
+                    }
+                }, 400); 
             }
         } else {
             isWebviewActive = false; 
+            awaitingTinymistJump = false;
         }
     });
 
-    context.subscriptions.push(previewCommand, forwardSync, autoSync);
-}
+    // 2. Wait for Tinymist to actually move the cursor
+    let selectionSync = vscode.window.onDidChangeTextEditorSelection(async (event) => {
+        if (!awaitingTinymistJump || isSyncing) return;
 
-// --- PURE MANUAL RENDER ENGINE ---
+        const editor = event.textEditor;
+        if (editor.document.fileName.endsWith('.typ')) {
+            // Tinymist just moved the cursor! Disarm the trap and execute the jump.
+            awaitingTinymistJump = false;
+            executeJumpLogic(editor);
+        }
+    });
+
+    context.subscriptions.push(previewCommand, forwardSync, autoSync, selectionSync);
+}
 
 // --- PURE MANUAL RENDER ENGINE ---
 
@@ -140,7 +166,7 @@ async function executeQuartoRender(doc: vscode.TextDocument) {
     const qmdPath = doc.fileName;
     const workspaceFolder = path.dirname(qmdPath);
     const typPath = qmdPath.replace('.qmd', '.typ');
-    const typFileName = path.basename(typPath); // Get just the filename (e.g., 'document.typ')
+    const typFileName = path.basename(typPath);
 
     const args = ['render', qmdPath, '--to', 'typst', '--cache', '-M', 'output-ext:typ', '-M', 'keep-typ:true'];
 
@@ -165,16 +191,14 @@ async function executeQuartoRender(doc: vscode.TextDocument) {
     quartoProcess.on('close', async (code) => {
         emitter.fire('\r\n--------------------------------------------------\r\n');
         if (code === 0 && !hasError) {
-            // Replaced the generic string with the actual filename variable
             emitter.fire(`\x1b[1;32m🎉 [Success] ${typFileName} successfully updated.\x1b[0m\r\n`);
             
-            emitter.fire(`\x1b[1;36m💡 [Tip] Check the "Problems" panel for any Typst syntax errors.\x1b[0m\r\n`);
+            emitter.fire(`\x1b[1;36m💡 [Tip] Check the "Problems" panel (Cmd+Shift+M) for any Typst syntax errors.\x1b[0m\r\n`);
             
             try {
                 const typUri = vscode.Uri.file(typPath);
                 await vscode.commands.executeCommand('workbench.action.files.revert', typUri);
             } catch (e) {
-                // Updated warning message as well
                 emitter.fire(`\x1b[1;33m⚠️ [Warning] Could not refresh ${typFileName}: ${e}\x1b[0m\r\n`);
             }
 
