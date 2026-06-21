@@ -15,7 +15,7 @@
     "myriad-dreamin.tinymist"
   ],
   "displayName": "Quarto-Tinymist Bidirectional Search",
-  "version": "3.1.1",
+  "version": "3.2.0",
   "engines": {
     "vscode": "^1.80.0"
   },
@@ -51,6 +51,11 @@
         "command": "qmd2typ.forwardSync",
         "title": "Forward Sync to Typst",
         "icon": "$(eye)"
+      },
+      {
+        "command": "qmd2typ.exportPdf",
+        "title": "Export Final PDF",
+        "icon": "$(file-pdf)"
       }
     ],
     "menus": {
@@ -64,6 +69,11 @@
           "command": "qmd2typ.forwardSync",
           "when": "resourceExtname == .qmd",
           "group": "navigation@2"
+        },
+        {
+          "command": "qmd2typ.exportPdf",
+          "when": "resourceExtname == .qmd",
+          "group": "navigation@3"
         }
       ]
     },
@@ -78,6 +88,12 @@
         "command": "qmd2typ.forwardSync",
         "key": "ctrl+shift+j",
         "mac": "cmd+shift+j",
+        "when": "editorTextFocus && resourceExtname == .qmd"
+      },
+      {
+        "command": "qmd2typ.exportPdf",
+        "key": "ctrl+shift+v",
+        "mac": "cmd+shift+v",
         "when": "editorTextFocus && resourceExtname == .qmd"
       }
     ]

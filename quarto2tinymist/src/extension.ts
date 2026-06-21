@@ -68,6 +68,24 @@ export function activate(context: vscode.ExtensionContext) {
         }
     });
 
+    // COMMAND: Export Typst to PDF
+    let exportPdfCommand = vscode.commands.registerCommand('qmd2typ.exportPdf', async () => {
+        const editor = vscode.window.activeTextEditor;
+        if (editor && editor.document.fileName.endsWith('.typ')) {
+            await editor.document.save();
+            await executeTypstToPdf(editor.document);
+        } else if (editor && editor.document.languageId === 'quarto') {
+            // Optional: If triggered from a .qmd, automatically try to compile its target .typ
+            const typPath = editor.document.fileName.replace('.qmd', '.typ');
+            if (fs.existsSync(typPath)) {
+                const typDoc = await vscode.workspace.openTextDocument(typPath);
+                await executeTypstToPdf(typDoc);
+            } else {
+                vscode.window.showErrorMessage("No compiled .typ file found for this .qmd yet. Preview it first.");
+            }
+        }
+    });
+
     // HELPER: Extracted jump logic to keep things clean
     async function executeJumpLogic(typEditor: vscode.TextEditor) {
         isSyncing = true;
@@ -168,7 +186,7 @@ export function activate(context: vscode.ExtensionContext) {
         }
     });
 
-    context.subscriptions.push(previewCommand, forwardSync, autoSync, selectionSync);
+    context.subscriptions.push(previewCommand, forwardSync, exportPdfCommand, autoSync, selectionSync);
 }
 
 // --- PURE MANUAL RENDER ENGINE ---
@@ -225,6 +243,55 @@ async function executeQuartoRender(doc: vscode.TextDocument) {
         } else {
             const finalCode = code !== 0 ? code : 'Caught by log parser';
             emitter.fire(`\x1b[1;31m🔥 [Error] Render failed (Exit Code: ${finalCode}).\x1b[0m\r\n`);
+        }
+    });
+}
+
+// --- PDF COMPILATION ENGINE ---
+// --- PDF COMPILATION ENGINE ---
+
+async function executeTypstToPdf(doc: vscode.TextDocument) {
+    const typPath = doc.fileName;
+    if (!typPath.endsWith('.typ')) return;
+
+    const workspaceFolder = path.dirname(typPath);
+    const pdfFileName = path.basename(typPath).replace('.typ', '.pdf');
+
+    // FIX 1: Use Quarto's bundled typst compiler instead of a standalone typst installation
+    const args = ['typst', 'compile', typPath];
+
+    const { terminal, emitter } = getRenderTerminal();
+    terminal.show(true);
+    emitter.fire('\x1b[2J\x1b[3J\x1b[H');
+    emitter.fire(`\x1b[1;34m📄 [Compiling PDF] ${path.basename(typPath)}...\x1b[0m\r\n\r\n`);
+
+    // Spawn 'quarto' instead of 'typst'
+    const typstProcess = spawn('quarto', args, { cwd: workspaceFolder });
+    let hasError = false;
+
+    const processOutput = (data: Buffer) => {
+        const rawText = data.toString();
+        const cleanText = rawText.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
+        if (/error:|failed|exception/i.test(cleanText)) hasError = true;
+        emitter.fire(rawText.replace(/\r?\n/g, '\r\n'));
+    };
+
+    typstProcess.stdout?.on('data', processOutput);
+    typstProcess.stderr?.on('data', processOutput);
+
+    // FIX 2: Catch process launch errors so it never hangs silently again
+    typstProcess.on('error', (err) => {
+        emitter.fire('\r\n--------------------------------------------------\r\n');
+        emitter.fire(`\x1b[1;31m🔥 [System Error] Could not start compiler: ${err.message}\x1b[0m\r\n`);
+    });
+
+    typstProcess.on('close', (code) => {
+        emitter.fire('\r\n--------------------------------------------------\r\n');
+        if (code === 0 && !hasError) {
+            emitter.fire(`\x1b[1;32m🎉 [Success] ${pdfFileName} successfully generated.\x1b[0m\r\n`);
+        } else {
+            const finalCode = code !== 0 ? code : 'Caught by log parser';
+            emitter.fire(`\x1b[1;31m🔥 [Error] PDF Compilation failed (Exit Code: ${finalCode}).\x1b[0m\r\n`);
         }
     });
 }
