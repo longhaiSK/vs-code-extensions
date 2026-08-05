@@ -199,16 +199,34 @@ async function executeQuartoRender(doc: vscode.TextDocument) {
 
     const args = ['render', qmdPath, '--to', 'typst', '--cache', '-M', 'output-ext:typ', '-M', 'keep-typ:true'];
 
+    // --- NEW DEBUG LOGGING ---
+    console.log(`[qmd2typ-debug] === STARTING QUARTO RENDER ===`);
+    console.log(`[qmd2typ-debug] Target File: ${qmdPath}`);
+    console.log(`[qmd2typ-debug] Workspace CWD: ${workspaceFolder}`);
+    console.log(`[qmd2typ-debug] Command: quarto ${args.join(' ')}`);
+
     const { terminal, emitter } = getRenderTerminal();
     terminal.show(true); 
     emitter.fire('\x1b[2J\x1b[3J\x1b[H'); 
-    emitter.fire(`\x1b[1;34m🚀 [Rendering] ${path.basename(qmdPath)}...\x1b[0m\r\n\r\n`);
+    emitter.fire(`\x1b[1;34m🚀 [Rendering] ${path.basename(qmdPath)}...\x1b[0m\r\n`);
+    emitter.fire(`\x1b[1;30m   [Debug] CWD: ${workspaceFolder}\x1b[0m\r\n`);
+    emitter.fire(`\x1b[1;30m   [Debug] Command: quarto ${args.join(' ')}\x1b[0m\r\n\r\n`);
 
-    const quartoProcess = spawn('quarto', args, { cwd: workspaceFolder });
+    let quartoProcess;
+    try {
+        quartoProcess = spawn('quarto', args, { cwd: workspaceFolder });
+        console.log(`[qmd2typ-debug] Spawned Quarto Process ID: ${quartoProcess.pid}`);
+    } catch (spawnErr) {
+        console.error(`[qmd2typ-debug] Hard Spawn Exception:`, spawnErr);
+        emitter.fire(`\x1b[1;31m🔥 [System Error] Hard exception spawning Quarto: ${String(spawnErr)}\x1b[0m\r\n`);
+        return;
+    }
+    
     let hasError = false;
 
     const processOutput = (data: Buffer) => {
         const rawText = data.toString();
+        console.log(`[qmd2typ-debug] Quarto Output: ${rawText.trim()}`);
         const cleanText = rawText.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
         if (/error:|failed|exception/i.test(cleanText)) hasError = true;
         emitter.fire(rawText.replace(/\r?\n/g, '\r\n'));
@@ -217,7 +235,17 @@ async function executeQuartoRender(doc: vscode.TextDocument) {
     quartoProcess.stdout?.on('data', processOutput);
     quartoProcess.stderr?.on('data', processOutput);
 
+    // --- THE MISSING ERROR HANDLER ---
+    quartoProcess.on('error', (err) => {
+        console.error(`[qmd2typ-debug] Process Error emitted:`, err);
+        emitter.fire('\r\n--------------------------------------------------\r\n');
+        emitter.fire(`\x1b[1;31m🔥 [System Error] Could not start Quarto compiler.\x1b[0m\r\n`);
+        emitter.fire(`\x1b[1;31m   Message: ${err.message}\x1b[0m\r\n`);
+        emitter.fire(`\x1b[1;33m   Troubleshooting: Is 'quarto' in your system PATH? Positron might have different environment variables than standard VS Code.\x1b[0m\r\n`);
+    });
+
     quartoProcess.on('close', async (code) => {
+        console.log(`[qmd2typ-debug] Quarto Process closed with Exit Code: ${code}`);
         emitter.fire('\r\n--------------------------------------------------\r\n');
         if (code === 0 && !hasError) {
             emitter.fire(`\x1b[1;32m🎉 [Success] ${typFileName} successfully updated.\x1b[0m\r\n`);
@@ -227,7 +255,9 @@ async function executeQuartoRender(doc: vscode.TextDocument) {
             try {
                 const typUri = vscode.Uri.file(typPath);
                 await vscode.commands.executeCommand('workbench.action.files.revert', typUri);
+                console.log(`[qmd2typ-debug] Reverted target .typ file to refresh editor.`);
             } catch (e) {
+                console.error(`[qmd2typ-debug] Revert failed:`, e);
                 emitter.fire(`\x1b[1;33m⚠️ [Warning] Could not refresh ${typFileName}: ${e}\x1b[0m\r\n`);
             }
 
@@ -235,6 +265,7 @@ async function executeQuartoRender(doc: vscode.TextDocument) {
             try {
                 const activeEditor = vscode.window.activeTextEditor;
                 if (activeEditor && activeEditor.document.fileName === qmdPath) {
+                    console.log(`[qmd2typ-debug] Triggering forward sync...`);
                     await syncQmdToTyp(activeEditor.document.uri, activeEditor.selection.active, activeEditor.viewColumn, true);
                 }
             } finally {
@@ -247,7 +278,6 @@ async function executeQuartoRender(doc: vscode.TextDocument) {
     });
 }
 
-// --- PDF COMPILATION ENGINE ---
 // --- PDF COMPILATION ENGINE ---
 
 async function executeTypstToPdf(doc: vscode.TextDocument) {
