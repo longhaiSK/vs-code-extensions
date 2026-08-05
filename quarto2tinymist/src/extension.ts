@@ -191,6 +191,8 @@ export function activate(context: vscode.ExtensionContext) {
 
 // --- PURE MANUAL RENDER ENGINE ---
 
+// --- PURE MANUAL RENDER ENGINE ---
+
 async function executeQuartoRender(doc: vscode.TextDocument) {
     const qmdPath = doc.fileName;
     const workspaceFolder = path.dirname(qmdPath);
@@ -199,7 +201,6 @@ async function executeQuartoRender(doc: vscode.TextDocument) {
 
     const args = ['render', qmdPath, '--to', 'typst', '--cache', '-M', 'output-ext:typ', '-M', 'keep-typ:true'];
 
-    // --- NEW DEBUG LOGGING ---
     console.log(`[qmd2typ-debug] === STARTING QUARTO RENDER ===`);
     console.log(`[qmd2typ-debug] Target File: ${qmdPath}`);
     console.log(`[qmd2typ-debug] Workspace CWD: ${workspaceFolder}`);
@@ -212,9 +213,19 @@ async function executeQuartoRender(doc: vscode.TextDocument) {
     emitter.fire(`\x1b[1;30m   [Debug] CWD: ${workspaceFolder}\x1b[0m\r\n`);
     emitter.fire(`\x1b[1;30m   [Debug] Command: quarto ${args.join(' ')}\x1b[0m\r\n\r\n`);
 
+    // --- PATH INJECTION FIX ---
+    const processEnv = Object.assign({}, process.env);
+    if (process.platform === 'darwin') {
+        processEnv.PATH = `${processEnv.PATH}:/usr/local/bin:/opt/homebrew/bin:/Applications/quarto/bin`;
+    }
+
     let quartoProcess;
     try {
-        quartoProcess = spawn('quarto', args, { cwd: workspaceFolder });
+        quartoProcess = spawn('quarto', args, { 
+            cwd: workspaceFolder,
+            env: processEnv,
+            shell: true // Forces Node to execute via the system shell
+        });
         console.log(`[qmd2typ-debug] Spawned Quarto Process ID: ${quartoProcess.pid}`);
     } catch (spawnErr) {
         console.error(`[qmd2typ-debug] Hard Spawn Exception:`, spawnErr);
@@ -235,7 +246,6 @@ async function executeQuartoRender(doc: vscode.TextDocument) {
     quartoProcess.stdout?.on('data', processOutput);
     quartoProcess.stderr?.on('data', processOutput);
 
-    // --- THE MISSING ERROR HANDLER ---
     quartoProcess.on('error', (err) => {
         console.error(`[qmd2typ-debug] Process Error emitted:`, err);
         emitter.fire('\r\n--------------------------------------------------\r\n');
@@ -287,7 +297,6 @@ async function executeTypstToPdf(doc: vscode.TextDocument) {
     const workspaceFolder = path.dirname(typPath);
     const pdfFileName = path.basename(typPath).replace('.typ', '.pdf');
 
-    // FIX 1: Use Quarto's bundled typst compiler instead of a standalone typst installation
     const args = ['typst', 'compile', typPath];
 
     const { terminal, emitter } = getRenderTerminal();
@@ -295,8 +304,24 @@ async function executeTypstToPdf(doc: vscode.TextDocument) {
     emitter.fire('\x1b[2J\x1b[3J\x1b[H');
     emitter.fire(`\x1b[1;34m📄 [Compiling PDF] ${path.basename(typPath)}...\x1b[0m\r\n\r\n`);
 
-    // Spawn 'quarto' instead of 'typst'
-    const typstProcess = spawn('quarto', args, { cwd: workspaceFolder });
+    // --- PATH INJECTION FIX ---
+    const processEnv = Object.assign({}, process.env);
+    if (process.platform === 'darwin') {
+        processEnv.PATH = `${processEnv.PATH}:/usr/local/bin:/opt/homebrew/bin:/Applications/quarto/bin`;
+    }
+
+    let typstProcess;
+    try {
+        typstProcess = spawn('quarto', args, { 
+            cwd: workspaceFolder,
+            env: processEnv,
+            shell: true 
+        });
+    } catch (spawnErr) {
+        emitter.fire(`\x1b[1;31m🔥 [System Error] Hard exception spawning compiler: ${String(spawnErr)}\x1b[0m\r\n`);
+        return;
+    }
+    
     let hasError = false;
 
     const processOutput = (data: Buffer) => {
@@ -309,7 +334,6 @@ async function executeTypstToPdf(doc: vscode.TextDocument) {
     typstProcess.stdout?.on('data', processOutput);
     typstProcess.stderr?.on('data', processOutput);
 
-    // FIX 2: Catch process launch errors so it never hangs silently again
     typstProcess.on('error', (err) => {
         emitter.fire('\r\n--------------------------------------------------\r\n');
         emitter.fire(`\x1b[1;31m🔥 [System Error] Could not start compiler: ${err.message}\x1b[0m\r\n`);
