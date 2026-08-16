@@ -8,13 +8,14 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
-import { spawn } from 'child_process'; 
+import * as yaml from 'js-yaml';
+import { spawn } from 'child_process';
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // Global State
-let isSyncing = false; 
-let isWebviewActive = false; 
+let isSyncing = false;
+let isWebviewActive = false;
 let lastActiveQmd: string | undefined;
 let awaitingTinymistJump = false;
 let selectionTimeout: NodeJS.Timeout | undefined;
@@ -43,14 +44,201 @@ function getRenderTerminal() {
     return { terminal: renderTerminal, emitter: terminalEmitter };
 }
 
+// --- TYPST FORMAT SELECTION ---
+
+interface TypstFormatOption {
+    id: string;      // value passed to `quarto render --to <id>`
+    label: string;   // display title
+    source: string;  // where this format was discovered, shown as QuickPick detail
+}
+
+const FORMAT_STATE_PREFIX = 'qmd2typ.format:';
+
+function getSelectedFormat(context: vscode.ExtensionContext, qmdPath: string): string {
+    return context.workspaceState.get<string>(FORMAT_STATE_PREFIX + qmdPath, 'typst');
+}
+
+async function setSelectedFormat(context: vscode.ExtensionContext, qmdPath: string, formatId: string) {
+    await context.workspaceState.update(FORMAT_STATE_PREFIX + qmdPath, formatId);
+}
+
+// Recursively locate every _extension.yml/_extension.yaml under a directory.
+function findExtensionYmlFiles(dir: string, depth: number = 0): string[] {
+    const results: string[] = [];
+    if (depth > 4) return results; // guard against unexpectedly deep/circular trees
+
+    let entries: fs.Dirent[];
+    try {
+        entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+        return results;
+    }
+
+    for (const entry of entries) {
+        const fullPath = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+            results.push(...findExtensionYmlFiles(fullPath, depth + 1));
+        } else if (entry.isFile() && /^_extension\.ya?ml$/.test(entry.name)) {
+            results.push(fullPath);
+        }
+    }
+    return results;
+}
+
+// Quarto resolves `_extensions` at the document's directory and each ancestor
+// up to the project root (marked by _quarto.yml) or the workspace boundary.
+function findExtensionsDirs(qmdPath: string): string[] {
+    const dirs: string[] = [];
+    let current = path.dirname(qmdPath);
+    const workspaceFolder = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(qmdPath))?.uri.fsPath;
+    const boundary = workspaceFolder ? path.dirname(workspaceFolder) : path.parse(current).root;
+
+    while (true) {
+        const extDir = path.join(current, '_extensions');
+        if (fs.existsSync(extDir)) dirs.push(extDir);
+
+        const isProjectRoot = fs.existsSync(path.join(current, '_quarto.yml')) ||
+                               fs.existsSync(path.join(current, '_quarto.yaml'));
+        const parent = path.dirname(current);
+        if (isProjectRoot || parent === current || current === boundary) break;
+        current = parent;
+    }
+    return dirs;
+}
+
+// A Quarto format extension declares its base engine as a key under
+// contributes.formats (e.g. `typst:`). The installed format's id is then
+// `<extension-dir-name>-<baseEngine>`, e.g. _extensions/jasa/ + `typst:` -> "jasa-typst".
+function scanExtensionTypstFormats(qmdPath: string): TypstFormatOption[] {
+    const options: TypstFormatOption[] = [];
+    const seen = new Set<string>();
+    const qmdDir = path.dirname(qmdPath);
+
+    for (const extDir of findExtensionsDirs(qmdPath)) {
+        for (const ymlPath of findExtensionYmlFiles(extDir)) {
+            try {
+                const doc = yaml.load(fs.readFileSync(ymlPath, 'utf8')) as any;
+                const formats = doc?.contributes?.formats;
+                if (formats && typeof formats === 'object' && 'typst' in formats) {
+                    const extName = path.basename(path.dirname(ymlPath));
+                    const id = `${extName}-typst`;
+                    if (!seen.has(id)) {
+                        seen.add(id);
+                        const title = typeof doc?.title === 'string' ? doc.title : extName;
+                        options.push({ id, label: title, source: path.relative(qmdDir, ymlPath) });
+                    }
+                }
+            } catch (e) {
+                console.error(`[qmd2typ-debug] Failed to parse ${ymlPath}:`, e);
+            }
+        }
+    }
+    return options;
+}
+
+// Also surface any typst-based format already referenced in this document's
+// frontmatter or the project's _quarto.yml, even if its _extension.yml lives
+// outside the directories scanned above.
+function scanDeclaredFormats(qmdPath: string): TypstFormatOption[] {
+    const options: TypstFormatOption[] = [];
+
+    const addFromFormatValue = (formatValue: any, source: string) => {
+        const keys: string[] = typeof formatValue === 'string'
+            ? [formatValue]
+            : (formatValue && typeof formatValue === 'object' ? Object.keys(formatValue) : []);
+        for (const key of keys) {
+            if (key === 'typst' || key.endsWith('-typst')) {
+                options.push({ id: key, label: key, source });
+            }
+        }
+    };
+
+    try {
+        const qmdContent = fs.readFileSync(qmdPath, 'utf8');
+        const fmMatch = qmdContent.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+        if (fmMatch) {
+            const fm = yaml.load(fmMatch[1]) as any;
+            if (fm?.format !== undefined) {
+                addFromFormatValue(fm.format, `${path.basename(qmdPath)} frontmatter`);
+            }
+        }
+    } catch (e) {
+        console.error(`[qmd2typ-debug] Failed to parse frontmatter of ${qmdPath}:`, e);
+    }
+
+    let current = path.dirname(qmdPath);
+    for (const name of ['_quarto.yml', '_quarto.yaml']) {
+        const quartoYmlPath = path.join(current, name);
+        if (fs.existsSync(quartoYmlPath)) {
+            try {
+                const doc = yaml.load(fs.readFileSync(quartoYmlPath, 'utf8')) as any;
+                if (doc?.format !== undefined) {
+                    addFromFormatValue(doc.format, name);
+                }
+            } catch (e) {
+                console.error(`[qmd2typ-debug] Failed to parse ${quartoYmlPath}:`, e);
+            }
+            break;
+        }
+    }
+    return options;
+}
+
+function scanTypstFormats(qmdPath: string): TypstFormatOption[] {
+    const options: TypstFormatOption[] = [
+        { id: 'typst', label: 'Typst', source: 'Quarto built-in' }
+    ];
+    const seen = new Set(options.map(o => o.id));
+
+    for (const opt of [...scanExtensionTypstFormats(qmdPath), ...scanDeclaredFormats(qmdPath)]) {
+        if (!seen.has(opt.id)) {
+            seen.add(opt.id);
+            options.push(opt);
+        }
+    }
+    return options;
+}
+
 export function activate(context: vscode.ExtensionContext) {
 
     // COMMAND: Manual Preview/Play
     let previewCommand = vscode.commands.registerCommand('qmd2typ.preview', async () => {
         const editor = vscode.window.activeTextEditor;
         if (editor && editor.document.languageId === 'quarto') {
-            await editor.document.save(); 
-            await executeQuartoRender(editor.document);
+            await editor.document.save();
+            await executeQuartoRender(editor.document, context);
+        }
+    });
+
+    // COMMAND: Select Typst Output Format
+    let selectFormatCommand = vscode.commands.registerCommand('qmd2typ.selectFormat', async () => {
+        const editor = vscode.window.activeTextEditor;
+        if (!editor || editor.document.languageId !== 'quarto') {
+            vscode.window.showWarningMessage('Open a .qmd file to select its Typst output format.');
+            return;
+        }
+
+        const qmdPath = editor.document.fileName;
+        const current = getSelectedFormat(context, qmdPath);
+        const formats = scanTypstFormats(qmdPath);
+
+        const items: (vscode.QuickPickItem & { formatId: string })[] = formats.map(f => ({
+            label: `${f.id === current ? '$(check) ' : ''}${f.label}`,
+            description: f.id,
+            detail: f.source,
+            formatId: f.id
+        }));
+
+        const picked = await vscode.window.showQuickPick(items, {
+            title: 'Select Typst Output Format',
+            placeHolder: `Current: ${current}`,
+            matchOnDescription: true,
+            matchOnDetail: true
+        });
+
+        if (picked) {
+            await setSelectedFormat(context, qmdPath, picked.formatId);
+            vscode.window.showInformationMessage(`Typst output format for ${path.basename(qmdPath)} set to "${picked.formatId}".`);
         }
     });
 
@@ -186,30 +374,32 @@ export function activate(context: vscode.ExtensionContext) {
         }
     });
 
-    context.subscriptions.push(previewCommand, forwardSync, exportPdfCommand, autoSync, selectionSync);
+    context.subscriptions.push(previewCommand, selectFormatCommand, forwardSync, exportPdfCommand, autoSync, selectionSync);
 }
 
 // --- PURE MANUAL RENDER ENGINE ---
 
 // --- PURE MANUAL RENDER ENGINE ---
 
-async function executeQuartoRender(doc: vscode.TextDocument) {
+async function executeQuartoRender(doc: vscode.TextDocument, context: vscode.ExtensionContext) {
     const qmdPath = doc.fileName;
     const workspaceFolder = path.dirname(qmdPath);
     const typPath = qmdPath.replace('.qmd', '.typ');
     const typFileName = path.basename(typPath);
+    const format = getSelectedFormat(context, qmdPath);
 
-    const args = ['render', qmdPath, '--to', 'typst', '--cache', '-M', 'output-ext:typ', '-M', 'keep-typ:true'];
+    const args = ['render', qmdPath, '--to', format, '--cache', '-M', 'output-ext:typ', '-M', 'keep-typ:true'];
 
     console.log(`[qmd2typ-debug] === STARTING QUARTO RENDER ===`);
     console.log(`[qmd2typ-debug] Target File: ${qmdPath}`);
     console.log(`[qmd2typ-debug] Workspace CWD: ${workspaceFolder}`);
+    console.log(`[qmd2typ-debug] Format: ${format}`);
     console.log(`[qmd2typ-debug] Command: quarto ${args.join(' ')}`);
 
     const { terminal, emitter } = getRenderTerminal();
-    terminal.show(true); 
-    emitter.fire('\x1b[2J\x1b[3J\x1b[H'); 
-    emitter.fire(`\x1b[1;34m🚀 [Rendering] ${path.basename(qmdPath)}...\x1b[0m\r\n`);
+    terminal.show(true);
+    emitter.fire('\x1b[2J\x1b[3J\x1b[H');
+    emitter.fire(`\x1b[1;34m🚀 [Rendering] ${path.basename(qmdPath)} (format: ${format})...\x1b[0m\r\n`);
     emitter.fire(`\x1b[1;30m   [Debug] CWD: ${workspaceFolder}\x1b[0m\r\n`);
     emitter.fire(`\x1b[1;30m   [Debug] Command: quarto ${args.join(' ')}\x1b[0m\r\n\r\n`);
 

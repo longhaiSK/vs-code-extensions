@@ -15,7 +15,7 @@
     "myriad-dreamin.tinymist"
   ],
   "displayName": "Quarto-Tinymist Bidirectional Search",
-  "version": "3.2.0",
+  "version": "3.3.0",
   "engines": {
     "vscode": "^1.80.0"
   },
@@ -29,12 +29,16 @@
     "test": "node ./out/test/runTest.js"
   },
   "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
     "@types/node": "^20.19.41",
     "@types/vscode": "^1.80.0",
     "@typescript-eslint/eslint-plugin": "^5.59.7",
     "@typescript-eslint/parser": "^5.59.7",
     "eslint": "^8.41.0",
     "typescript": "^5.1.3"
+  },
+  "dependencies": {
+    "js-yaml": "^4.1.0"
   },
   "activationEvents": [
     "onLanguage:quarto",
@@ -56,6 +60,11 @@
         "command": "qmd2typ.exportPdf",
         "title": "Export Final PDF",
         "icon": "$(file-pdf)"
+      },
+      {
+        "command": "qmd2typ.selectFormat",
+        "title": "Select Typst Output Format",
+        "icon": "$(list-selection)"
       }
     ],
     "menus": {
@@ -74,6 +83,11 @@
           "command": "qmd2typ.exportPdf",
           "when": "resourceExtname == .qmd",
           "group": "navigation@3"
+        },
+        {
+          "command": "qmd2typ.selectFormat",
+          "when": "resourceExtname == .qmd",
+          "group": "navigation@4"
         }
       ]
     },
