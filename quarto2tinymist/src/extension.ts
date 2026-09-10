@@ -54,8 +54,17 @@ interface TypstFormatOption {
 
 const FORMAT_STATE_PREFIX = 'qmd2typ.format:';
 
+// The format declared in the document itself (frontmatter `format:`, falling
+// back to the project's `_quarto.yml`), used as the default until the user
+// explicitly overrides it via qmd2typ.selectFormat.
+function getDocumentDefaultFormat(qmdPath: string): string {
+    const declared = scanDeclaredFormats(qmdPath);
+    return declared.length > 0 ? declared[0].id : 'typst';
+}
+
 function getSelectedFormat(context: vscode.ExtensionContext, qmdPath: string): string {
-    return context.workspaceState.get<string>(FORMAT_STATE_PREFIX + qmdPath, 'typst');
+    const override = context.workspaceState.get<string>(FORMAT_STATE_PREFIX + qmdPath);
+    return override !== undefined ? override : getDocumentDefaultFormat(qmdPath);
 }
 
 async function setSelectedFormat(context: vscode.ExtensionContext, qmdPath: string, formatId: string) {
@@ -222,12 +231,19 @@ export function activate(context: vscode.ExtensionContext) {
         const current = getSelectedFormat(context, qmdPath);
         const formats = scanTypstFormats(qmdPath);
 
+        const CUSTOM_FORMAT_ID = '__custom__';
         const items: (vscode.QuickPickItem & { formatId: string })[] = formats.map(f => ({
             label: `${f.id === current ? '$(check) ' : ''}${f.label}`,
             description: f.id,
             detail: f.source,
             formatId: f.id
         }));
+        items.push({
+            label: '$(edit) Specify custom format…',
+            description: 'Type any --to value manually',
+            detail: 'Use this if your format isn\'t auto-detected from _extension.yml or _quarto.yml',
+            formatId: CUSTOM_FORMAT_ID
+        });
 
         const picked = await vscode.window.showQuickPick(items, {
             title: 'Select Typst Output Format',
@@ -236,10 +252,22 @@ export function activate(context: vscode.ExtensionContext) {
             matchOnDetail: true
         });
 
-        if (picked) {
-            await setSelectedFormat(context, qmdPath, picked.formatId);
-            vscode.window.showInformationMessage(`Typst output format for ${path.basename(qmdPath)} set to "${picked.formatId}".`);
+        if (!picked) return;
+
+        let formatId = picked.formatId;
+        if (formatId === CUSTOM_FORMAT_ID) {
+            const typed = await vscode.window.showInputBox({
+                title: 'Custom Typst Output Format',
+                prompt: 'Enter the format id passed to `quarto render --to <id>` (e.g. jasa-typst)',
+                value: current,
+                validateInput: (value) => value.trim() === '' ? 'Format id cannot be empty.' : undefined
+            });
+            if (!typed) return;
+            formatId = typed.trim();
         }
+
+        await setSelectedFormat(context, qmdPath, formatId);
+        vscode.window.showInformationMessage(`Typst output format for ${path.basename(qmdPath)} set to "${formatId}".`);
     });
 
     // COMMAND: Forward Sync

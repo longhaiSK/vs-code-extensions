@@ -63,8 +63,8 @@
       },
       {
         "command": "qmd2typ.selectFormat",
-        "title": "Select Typst Output Format",
-        "icon": "$(list-selection)"
+        "title": "Select Typst Output Format (auto-detected from _extension.yml/_quarto.yml, or specify your own)",
+        "icon": "$(chevron-down)"
       }
     ],
     "menus": {
