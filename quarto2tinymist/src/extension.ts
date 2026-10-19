@@ -19,7 +19,6 @@ let isWebviewActive = false;
 let lastActiveQmd: string | undefined;
 let awaitingTinymistJump = false;
 let selectionTimeout: NodeJS.Timeout | undefined;
-const previewStarted = new Set<string>(); // .typ paths whose Tinymist preview this session already opened
 
 // --- CONFIGURATION ---
 // Adjust these values to tune the sync behavior on your specific machine
@@ -408,50 +407,85 @@ export function activate(context: vscode.ExtensionContext) {
 
 // --- PURE MANUAL RENDER ENGINE ---
 
-// --- PURE MANUAL RENDER ENGINE ---
+// --- TAB LOOKUP HELPERS ---
 
-// Opens the rendered .typ beside the .qmd and the Tinymist preview in a third editor
-// group (qmd | typ | preview), the first time it is rendered in this session (later
-// renders refresh the preview on their own), then returns focus to the .qmd.
-// Tinymist places its preview panel itself (in the group opposite the active editor),
-// so the panel is moved to the last group afterwards.
+// The tab (and its group) in which a .typ file is already open, in any editor group.
+function findTypTab(typUri: vscode.Uri): { tab: vscode.Tab; group: vscode.TabGroup } | undefined {
+    for (const group of vscode.window.tabGroups.all) {
+        for (const tab of group.tabs) {
+            if (tab.input instanceof vscode.TabInputText && tab.input.uri.fsPath === typUri.fsPath) {
+                return { tab, group };
+            }
+        }
+    }
+    return undefined;
+}
+
+// Tinymist's preview is a webview of type "typst-preview" titled "<file>.typ (Preview)".
+function findPreviewTab(typFileName: string): { tab: vscode.Tab; group: vscode.TabGroup } | undefined {
+    for (const group of vscode.window.tabGroups.all) {
+        for (const tab of group.tabs) {
+            if (tab.input instanceof vscode.TabInputWebview
+                && /typst-preview$/.test(tab.input.viewType)
+                && tab.label.startsWith(typFileName)) {
+                return { tab, group };
+            }
+        }
+    }
+    return undefined;
+}
+
+// Opens the rendered .typ as a tab next to the .qmd tab (same editor group), and the
+// Tinymist preview in its own editor group, then returns focus to the .qmd.
+// Nothing is opened twice: if the .typ is already open in some tab it is left alone,
+// and if its preview is already open only the preview-less case starts a new one.
+// Tinymist places its preview itself (in the group opposite the active .typ editor),
+// so with the .qmd and .typ tabs sharing a group the preview lands in a separate group.
 async function ensureTinymistPreview(typPath: string, qmdPath: string) {
-    if (previewStarted.has(typPath) || !fs.existsSync(typPath)) return;
+    if (!fs.existsSync(typPath)) return;
     try {
         const qmdEditor = vscode.window.visibleTextEditors.find(e => e.document.fileName === qmdPath);
         if (!qmdEditor) return;
+        const qmdColumn = qmdEditor.viewColumn;
+        const typUri = vscode.Uri.file(typPath);
+        const typFileName = path.basename(typPath);
         const focusQmd = () => vscode.window.showTextDocument(qmdEditor.document, {
-            viewColumn: qmdEditor.viewColumn,
+            viewColumn: qmdColumn,
             preserveFocus: false
         });
         await focusQmd();
 
-        if (vscode.window.tabGroups.all.length < 3) {
-            await vscode.commands.executeCommand('vscode.setEditorLayout', {
-                orientation: 0,
-                groups: [{}, {}, {}]
+        // 1. The .typ opens as a tab right after the .qmd tab, unless it is already open somewhere.
+        const typDoc = await vscode.workspace.openTextDocument(typUri);
+        if (!findTypTab(typUri)) {
+            await vscode.window.showTextDocument(typDoc, {
+                viewColumn: qmdColumn,
+                preserveFocus: false,
+                preview: false
             });
         }
 
-        const typDoc = await vscode.workspace.openTextDocument(vscode.Uri.file(typPath));
-        await vscode.window.showTextDocument(typDoc, {
-            viewColumn: vscode.ViewColumn.Beside,
-            preserveFocus: false,
-            preview: false
-        });
+        // 2. Start the preview only if this .typ has none open. The preview command acts on
+        //    the active .typ editor, so bring the .typ tab to the front first.
+        if (!findPreviewTab(typFileName)) {
+            const typGroup = findTypTab(typUri)?.group;
+            await vscode.window.showTextDocument(typDoc, {
+                viewColumn: typGroup?.viewColumn ?? qmdColumn,
+                preserveFocus: false,
+                preview: false
+            });
+            await vscode.commands.executeCommand('typst-preview.preview');
 
-        await vscode.commands.executeCommand('typst-preview.preview');
-        previewStarted.add(typPath);
+            // Wait for the preview webview to appear.
+            for (let i = 0; i < 30 && !findPreviewTab(typFileName); i++) {
+                await sleep(100);
+            }
 
-        // Wait for the preview webview to become the active tab, then send it to the last group.
-        for (let i = 0; i < 30; i++) {
-            const tab = vscode.window.tabGroups.activeTabGroup.activeTab;
-            if (tab && tab.input instanceof vscode.TabInputWebview) break;
-            await sleep(100);
-        }
-        const lastGroup = vscode.window.tabGroups.all[vscode.window.tabGroups.all.length - 1];
-        if (vscode.window.tabGroups.activeTabGroup !== lastGroup) {
-            await vscode.commands.executeCommand('workbench.action.moveEditorToLastGroup');
+            // The preview must not share the .qmd/.typ group; move it to the next group if it does.
+            const preview = findPreviewTab(typFileName);
+            if (preview && preview.group.viewColumn === qmdColumn) {
+                await vscode.commands.executeCommand('workbench.action.moveEditorToNextGroup');
+            }
         }
 
         await sleep(SETTLE_DELAY_MS);
@@ -728,13 +762,18 @@ async function syncQmdToTyp(qmdUri: vscode.Uri, cursor: vscode.Position, viewCol
             const startPos = new vscode.Position(globalBestLine, startCol);
             const cursorPos = new vscode.Position(globalBestLine, endCol);
             
-            // Reuse the group the .typ is already shown in; otherwise a bare showTextDocument
-            // opens a second copy in the active (qmd) group.
-            const shownTyp = vscode.window.visibleTextEditors.find(e => e.document.uri.fsPath === typUri.fsPath);
+            // Show the .typ in the group of the tab it is already open in (not only where it is
+            // currently visible: a tab behind the .qmd in the same group is not "visible"), so
+            // no second copy is ever opened; if it is not open yet, put it next to the .qmd.
+            const qmdColumn = viewCol ?? vscode.ViewColumn.One;
+            const typColumn = findTypTab(typUri)?.group.viewColumn ?? qmdColumn;
             const typEditor = await vscode.window.showTextDocument(typDoc, {
-                viewColumn: shownTyp?.viewColumn ?? vscode.ViewColumn.Beside,
-                preserveFocus: true
+                viewColumn: typColumn,
+                preserveFocus: true,
+                preview: false
             });
+            // With the .typ tab in the .qmd's own group, showing it hides the .qmd, so always return.
+            const typInQmdGroup = typColumn === qmdColumn;
 
             typEditor.selection = new vscode.Selection(cursorPos, cursorPos);
             typEditor.revealRange(new vscode.Range(cursorPos, cursorPos), vscode.TextEditorRevealType.InCenter);
@@ -756,7 +795,7 @@ async function syncQmdToTyp(qmdUri: vscode.Uri, cursor: vscode.Position, viewCol
                 await vscode.commands.executeCommand('cursorMove', { to: 'right', by: 'character', value: 1 });
                 await vscode.commands.executeCommand('cursorMove', { to: 'left', by: 'character', value: 1 });
                 
-                if (returnFocus) {
+                if (returnFocus || typInQmdGroup) {
                     await vscode.window.showTextDocument(qmdDoc, {
                         viewColumn: viewCol || vscode.ViewColumn.One,
                         preserveFocus: false
