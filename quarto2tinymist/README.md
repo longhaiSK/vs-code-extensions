@@ -19,12 +19,13 @@ Unlike standard text jumpers, **Quarto Typst Sync** is built for complex project
 *   **⚡ High-Speed Render:** Triggers a cached Quarto render that updates your `.typ` file in the background, forcing an instant PDF refresh.
 *   **🔍 Precision Inverse-Sync:** Move from PDF → Typst → Quarto in milliseconds.
 *   **🎯 Forward-Sync:** Jump from your `.qmd` draft to the corresponding location in the `.typ` file.
-*   **📋 Smart Output Logging:** A dedicated output channel captures detailed multi-line Typst/Pandoc error traces, making debugging math and syntax errors a breeze.
+*   **📋 Smart Output Logging:** A dedicated "Quarto -> Typst" terminal shows the render log, including multi-line Typst/Pandoc error traces, making debugging math and syntax errors a breeze.
+*   **🗂️ Tidy Layout:** The generated `.typ` opens as a tab next to your `.qmd` (never twice), and the Tinymist preview gets its own editor group.
 
 ## How to Use
 
 ### 1. Build the Bridge (Render)
-Click the **Play icon** in your editor title bar or use the command `Render Quarto to Typst`. This saves your file and runs a background render. Your Tinymist preview will update automatically.
+Click the **Play icon** in your editor title bar or use the command `Render Quarto to Typst`. This saves your file and runs a background render. The first time, the generated `.typ` opens as a tab next to your `.qmd` and the Tinymist preview opens in a separate editor group; later renders just refresh them, and nothing is opened twice. Use the **format picker** (chevron icon) to choose the Typst output format; it is detected from your document, `_quarto.yml` and `_extensions`.
 
 ### 2. Inverse Search (Preview → Source)
 Double-click a line in your **PDF Preview**. Tinymist will jump to the `.typ` file; Quarto Typst Sync will instantly "hop" you over to the correct `.qmd` file and highlight the paragraph in **red**.
@@ -32,19 +33,24 @@ Double-click a line in your **PDF Preview**. Tinymist will jump to the `.typ` fi
 ### 3. Forward Sync (Source → Preview)
 With your cursor in a `.qmd` file, use the shortcut or the **Arrow icon** in the title bar to find that same location in the Typst source.
 
-## Recommended Keybindings
+## Commands and Keybindings
 
-To make the workflow feel native, add these to your `keybindings.json`:
+All commands are in the editor title bar for `.qmd` files and have default keybindings (which you can change in `keybindings.json`):
 
-| Command | Shortcut (Mac) | Shortcut (Windows) | Action |
+| Command | Shortcut (Mac) | Shortcut (Windows/Linux) | Action |
 | :--- | :--- | :--- | :--- |
-| `qmd2typ.preview` | `Cmd + Shift + T` | `Ctrl + Shift + T` | Render `.qmd` to `.typ` |
-| `qmd2typ.forwardSync` | `Cmd + Shift + F` | `Ctrl + Shift + F` | Jump from `.qmd` to `.typ` |
+| `qmd2typ.preview` | `Cmd + Shift + R` | `Ctrl + Shift + R` | Render `.qmd` to `.typ` and open the preview |
+| `qmd2typ.forwardSync` | `Cmd + Shift + J` | `Ctrl + Shift + J` | Jump from `.qmd` to the matching place in the `.typ` and preview |
+| `qmd2typ.exportPdf` | `Cmd + Shift + V` | `Ctrl + Shift + V` | Compile the `.typ` to a final PDF |
+| `qmd2typ.selectFormat` | (title bar) | (title bar) | Choose the Typst output format passed to `quarto render --to` |
 
 ## Requirements
 
 *   **[Quarto CLI](https://quarto.org/docs/get-started/)**: Must be installed and available in your system PATH.
 *   **[Tinymist Typst Extension](https://marketplace.visualstudio.com/items?itemName=myriad-dreamin.tinymist)**: Required for the PDF preview and LSP support.
+*   **[Quarto extension](https://marketplace.visualstudio.com/items?itemName=quarto.quarto)**: Provides `.qmd` language support.
+
+Both extensions are installed automatically as dependencies. The extension runs in VS Code and Positron.
 
 ## Why this exists?
 

@@ -1,9 +1,15 @@
 # Change Log
 
-All notable changes to the "typ2qmd" extension will be documented in this file.
+All notable changes to "Quarto-Tinymist Bidirectional Search" (qmd2typ-pro).
 
-Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how to structure this file.
+## [3.4.0]
 
-## [Unreleased]
+- Render now opens the generated `.typ` as a tab next to the `.qmd` (in the same editor group) instead of repeatedly opening it beside the preview. An already-open `.typ` is never opened again.
+- The Tinymist preview opens in its own editor group, and is started only if that `.typ` has no preview open.
+- Forward sync reuses the group where the `.typ` is open and returns to the `.qmd`.
+- Added a marketplace icon, categories, keywords and license metadata; README documents all commands and keybindings.
 
-- Initial release
+## [3.3.0]
+
+- Typst output format picker (auto-detected from the document, `_quarto.yml` and `_extensions`).
+- Export final PDF command, forward sync and inverse search between `.qmd` and `.typ`.

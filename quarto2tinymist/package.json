@@ -1,24 +1,43 @@
 {
   "name": "qmd2typ-pro",
+  "displayName": "Quarto-Tinymist Bidirectional Search",
   "description": "One-click render and invserse-search for Quarto-Typst workflows.",
-  "author": "Longhai Li",
+  "version": "3.4.0",
   "publisher": "Prof-LonghaiLi",
+  "author": "Longhai Li",
+  "license": "MIT",
+  "icon": "icons/icon.png",
+  "homepage": "https://github.com/longhaiSK/vs-code-extensions/tree/main/quarto2tinymist#readme",
   "repository": {
     "type": "git",
-    "url": "https://github.com/longhaisk/vs-code-extensions.git"
+    "url": "https://github.com/longhaiSK/vs-code-extensions.git",
+    "directory": "quarto2tinymist"
   },
   "bugs": {
-    "url": "https://github.com/longhaisk/vs-code-extensions/issues"
+    "url": "https://github.com/longhaiSK/vs-code-extensions/issues"
+  },
+  "categories": [
+    "Other",
+    "Visualization"
+  ],
+  "keywords": [
+    "quarto",
+    "typst",
+    "tinymist",
+    "qmd",
+    "preview",
+    "synctex",
+    "forward search",
+    "inverse search",
+    "pdf"
+  ],
+  "engines": {
+    "vscode": "^1.80.0"
   },
   "extensionDependencies": [
     "quarto.quarto",
     "myriad-dreamin.tinymist"
   ],
-  "displayName": "Quarto-Tinymist Bidirectional Search",
-  "version": "3.3.0",
-  "engines": {
-    "vscode": "^1.80.0"
-  },
   "main": "./out/extension.js",
   "scripts": {
     "vscode:prepublish": "npm run compile",

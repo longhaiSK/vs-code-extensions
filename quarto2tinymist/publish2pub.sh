@@ -17,8 +17,6 @@ else
     echo " -> Warning: .vsix file not found, skipping GitHub upload."
 fi
 
-echo "Done! Please restart or reload Positron."
-
 # # 7. Publish to VS Code Marketplace
 # echo "Publishing to VS Code Marketplace..."
 # if [[ -z "$VSCE_PAT" ]]; then
@@ -30,14 +28,18 @@ echo "Done! Please restart or reload Positron."
 #     echo " -> Published successfully to VS Code Marketplace!"
 # fi
 
-# # 8. Publish to Open VSX Registry (Positron/VSCodium)
-# echo "Publishing to Open VSX Registry..."
-# if ! command -v ovsx &> /dev/null; then
-#     echo " -> Warning: 'ovsx' CLI not found. Install with: npm install -g ovsx"
-# elif [[ -z "$OVSX_PAT" ]]; then
-#     echo " -> Warning: OVSX_PAT environment variable not set. Skipping Open VSX."
-# else
-#     # ovsx publish uses the built vsix file and the token
-#     ovsx publish "$VSIX_FILE" -p "$OVSX_PAT"
-#     echo " -> Published successfully to Open VSX Registry!"
-# fi
+# (VS Code Marketplace step above is left disabled for now.)
+
+# 8. Publish to Open VSX Registry (Positron/VSCodium)
+echo "Publishing to Open VSX Registry..."
+if ! command -v ovsx &> /dev/null; then
+    echo " -> Warning: 'ovsx' CLI not found. Install with: npm install -g ovsx"
+elif [[ -z "$OVSX_PAT" ]]; then
+    echo " -> Warning: OVSX_PAT environment variable not set. Skipping Open VSX."
+else
+    # ovsx publish uses the built vsix file and the token
+    ovsx publish "$VSIX_FILE" -p "$OVSX_PAT"
+    echo " -> Published successfully to Open VSX Registry!"
+fi
+
+echo "Done! Please restart or reload Positron."
