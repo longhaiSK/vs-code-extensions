@@ -19,6 +19,7 @@ let isWebviewActive = false;
 let lastActiveQmd: string | undefined;
 let awaitingTinymistJump = false;
 let selectionTimeout: NodeJS.Timeout | undefined;
+const previewStarted = new Set<string>(); // .typ paths whose Tinymist preview this session already opened
 
 // --- CONFIGURATION ---
 // Adjust these values to tune the sync behavior on your specific machine
@@ -409,6 +410,57 @@ export function activate(context: vscode.ExtensionContext) {
 
 // --- PURE MANUAL RENDER ENGINE ---
 
+// Opens the rendered .typ beside the .qmd and the Tinymist preview in a third editor
+// group (qmd | typ | preview), the first time it is rendered in this session (later
+// renders refresh the preview on their own), then returns focus to the .qmd.
+// Tinymist places its preview panel itself (in the group opposite the active editor),
+// so the panel is moved to the last group afterwards.
+async function ensureTinymistPreview(typPath: string, qmdPath: string) {
+    if (previewStarted.has(typPath) || !fs.existsSync(typPath)) return;
+    try {
+        const qmdEditor = vscode.window.visibleTextEditors.find(e => e.document.fileName === qmdPath);
+        if (!qmdEditor) return;
+        const focusQmd = () => vscode.window.showTextDocument(qmdEditor.document, {
+            viewColumn: qmdEditor.viewColumn,
+            preserveFocus: false
+        });
+        await focusQmd();
+
+        if (vscode.window.tabGroups.all.length < 3) {
+            await vscode.commands.executeCommand('vscode.setEditorLayout', {
+                orientation: 0,
+                groups: [{}, {}, {}]
+            });
+        }
+
+        const typDoc = await vscode.workspace.openTextDocument(vscode.Uri.file(typPath));
+        await vscode.window.showTextDocument(typDoc, {
+            viewColumn: vscode.ViewColumn.Beside,
+            preserveFocus: false,
+            preview: false
+        });
+
+        await vscode.commands.executeCommand('typst-preview.preview');
+        previewStarted.add(typPath);
+
+        // Wait for the preview webview to become the active tab, then send it to the last group.
+        for (let i = 0; i < 30; i++) {
+            const tab = vscode.window.tabGroups.activeTabGroup.activeTab;
+            if (tab && tab.input instanceof vscode.TabInputWebview) break;
+            await sleep(100);
+        }
+        const lastGroup = vscode.window.tabGroups.all[vscode.window.tabGroups.all.length - 1];
+        if (vscode.window.tabGroups.activeTabGroup !== lastGroup) {
+            await vscode.commands.executeCommand('workbench.action.moveEditorToLastGroup');
+        }
+
+        await sleep(SETTLE_DELAY_MS);
+        await focusQmd();
+    } catch (e) {
+        console.error(`[qmd2typ-debug] Could not start Tinymist preview:`, e);
+    }
+}
+
 async function executeQuartoRender(doc: vscode.TextDocument, context: vscode.ExtensionContext) {
     const qmdPath = doc.fileName;
     const workspaceFolder = path.dirname(qmdPath);
@@ -491,6 +543,7 @@ async function executeQuartoRender(doc: vscode.TextDocument, context: vscode.Ext
 
             isSyncing = true;
             try {
+                await ensureTinymistPreview(typPath, qmdPath);
                 const activeEditor = vscode.window.activeTextEditor;
                 if (activeEditor && activeEditor.document.fileName === qmdPath) {
                     console.log(`[qmd2typ-debug] Triggering forward sync...`);
@@ -675,7 +728,13 @@ async function syncQmdToTyp(qmdUri: vscode.Uri, cursor: vscode.Position, viewCol
             const startPos = new vscode.Position(globalBestLine, startCol);
             const cursorPos = new vscode.Position(globalBestLine, endCol);
             
-            const typEditor = await vscode.window.showTextDocument(typDoc, { preserveFocus: true });
+            // Reuse the group the .typ is already shown in; otherwise a bare showTextDocument
+            // opens a second copy in the active (qmd) group.
+            const shownTyp = vscode.window.visibleTextEditors.find(e => e.document.uri.fsPath === typUri.fsPath);
+            const typEditor = await vscode.window.showTextDocument(typDoc, {
+                viewColumn: shownTyp?.viewColumn ?? vscode.ViewColumn.Beside,
+                preserveFocus: true
+            });
 
             typEditor.selection = new vscode.Selection(cursorPos, cursorPos);
             typEditor.revealRange(new vscode.Range(cursorPos, cursorPos), vscode.TextEditorRevealType.InCenter);
