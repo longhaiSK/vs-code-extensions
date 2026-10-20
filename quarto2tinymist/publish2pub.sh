@@ -21,17 +21,17 @@ else
     echo " -> Warning: .vsix file not found, skipping GitHub upload."
 fi
 
-# 7. Publish to VS Code Marketplace
-echo "Publishing to VS Code Marketplace..."
-if ! command -v vsce &> /dev/null; then
-    echo " -> Warning: 'vsce' CLI not found. Install with: npm install -g @vscode/vsce"
-elif [[ -z "$VSCE_PAT" ]]; then
-    echo " -> Warning: VSCE_PAT environment variable not set. Skipping VS Code Marketplace."
-else
-    # -i uses the already-built vsix; --skip-duplicate tolerates re-runs of the same version
-    vsce publish -i "$VSIX_FILE" -p "$VSCE_PAT" --skip-duplicate
-    echo " -> Published successfully to VS Code Marketplace!"
-fi
+# # 7. Publish to VS Code Marketplace
+# echo "Publishing to VS Code Marketplace..."
+# if ! command -v vsce &> /dev/null; then
+#     echo " -> Warning: 'vsce' CLI not found. Install with: npm install -g @vscode/vsce"
+# elif [[ -z "$VSCE_PAT" ]]; then
+#     echo " -> Warning: VSCE_PAT environment variable not set. Skipping VS Code Marketplace."
+# else
+#     # -i uses the already-built vsix; --skip-duplicate tolerates re-runs of the same version
+#     vsce publish -i "$VSIX_FILE" -p "$VSCE_PAT" --skip-duplicate
+#     echo " -> Published successfully to VS Code Marketplace!"
+# fi
 
 # 8. Publish to Open VSX Registry (Positron/VSCodium)
 echo "Publishing to Open VSX Registry..."
