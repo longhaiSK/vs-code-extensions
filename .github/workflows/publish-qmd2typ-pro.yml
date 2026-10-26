@@ -1,0 +1,36 @@
+name: Publish qmd2typ-pro
+
+# Runs only for release tags such as qmd2typ-pro-v3.4.1. Open VSX trusts this file via
+# trusted publishing (OIDC), so no OVSX_PAT secret is needed or wanted.
+on:
+  push:
+    tags: ['qmd2typ-pro-v*']
+
+permissions:
+  contents: write   # create the GitHub release
+  id-token: write   # OIDC token for Open VSX
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: publish   # requires approval; restricted to qmd2typ-pro-v* tags
+    defaults:
+      run:
+        working-directory: quarto2tinymist
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 20
+      - run: npm ci
+      - name: Check tag matches package.json
+        run: |
+          v=$(node -p "require('./package.json').version")
+          [ "${GITHUB_REF_NAME}" = "qmd2typ-pro-v$v" ] || { echo "Tag ${GITHUB_REF_NAME} != version $v"; exit 1; }
+      - run: npx --yes @vscode/vsce package
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" *.vsix --title "$GITHUB_REF_NAME" --generate-notes
+      - name: Publish to Open VSX
+        run: npx --yes ovsx publish *.vsix --trusted-publishing
