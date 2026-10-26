@@ -11,6 +11,9 @@ EXT_ID="Prof-LonghaiLi.qmd2typ-pro"
 CURRENT_VERSION=$(node -p "require('./package.json').version")
 echo "Building version: $CURRENT_VERSION"
 
+# 1b. Keep package-lock.json's version in step with package.json
+npm install --package-lock-only --silent
+
 # 2. Clean up old .vsix files from the local directory
 echo "Cleaning up local workspace..."
 for file in *.vsix(N); do
