@@ -2,6 +2,11 @@
 
 All notable changes to "Quarto-Tinymist Bidirectional Search" (qmd2typ-pro).
 
+## [3.4.2]
+
+- PDF button now works from a `.qmd`: `typst compile` runs with `--root` set to the Quarto project (or the `.typ` folder) so image paths resolve, and paths with spaces are quoted.
+- After a successful export, the PDF opens beside the `.typ`.
+
 ## [3.4.1]
 
 - Honors `output-file` in the `.qmd` front matter (top-level or under the format): render, forward sync, preview and PDF export use the `.typ` Quarto actually writes, and inverse search from that `.typ` jumps back to the original `.qmd`.

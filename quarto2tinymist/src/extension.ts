@@ -633,9 +633,17 @@ async function executeTypstToPdf(doc: vscode.TextDocument) {
     if (!typPath.endsWith('.typ')) return;
 
     const workspaceFolder = path.dirname(typPath);
-    const pdfFileName = path.basename(typPath).replace('.typ', '.pdf');
+    const pdfFileName = path.basename(typPath).replace(/\.typ$/i, '.pdf');
 
-    const args = ['typst', 'compile', typPath];
+    // Resolve images against the Quarto project root (where _quarto.yml lives), else the
+    // .typ's folder; quote paths so spaces survive `shell: true`.
+    let rootDir = workspaceFolder;
+    for (let d = workspaceFolder; ; d = path.dirname(d)) {
+        if (fs.existsSync(path.join(d, '_quarto.yml')) || fs.existsSync(path.join(d, '_quarto.yaml'))) { rootDir = d; break; }
+        if (path.dirname(d) === d) break;
+    }
+    const pdfPath = typPath.replace(/\.typ$/i, '.pdf');
+    const args = ['typst', 'compile', '--root', JSON.stringify(rootDir), JSON.stringify(typPath), JSON.stringify(pdfPath)];
 
     const { terminal, emitter } = getRenderTerminal();
     terminal.show(true);
@@ -681,6 +689,11 @@ async function executeTypstToPdf(doc: vscode.TextDocument) {
         emitter.fire('\r\n--------------------------------------------------\r\n');
         if (code === 0 && !hasError) {
             emitter.fire(`\x1b[1;32m🎉 [Success] ${pdfFileName} successfully generated.\x1b[0m\r\n`);
+            // Show the PDF in the column beside the .typ (default viewer for .pdf).
+            const typEditor = vscode.window.visibleTextEditors.find(e => e.document.fileName === typPath);
+            const viewColumn = typEditor?.viewColumn ? typEditor.viewColumn + 1 : vscode.ViewColumn.Beside;
+            Promise.resolve(vscode.commands.executeCommand('vscode.open', vscode.Uri.file(pdfPath), { viewColumn, preserveFocus: true }))
+                .catch(e => emitter.fire(`\x1b[1;31m🔥 [Error] Could not open ${pdfFileName}: ${String(e)}\x1b[0m\r\n`));
         } else {
             const finalCode = code !== 0 ? code : 'Caught by log parser';
             emitter.fire(`\x1b[1;31m🔥 [Error] PDF Compilation failed (Exit Code: ${finalCode}).\x1b[0m\r\n`);
