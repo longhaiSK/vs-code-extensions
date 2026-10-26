@@ -17,6 +17,7 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 let isSyncing = false;
 let isWebviewActive = false;
 let lastActiveQmd: string | undefined;
+let extensionContext: vscode.ExtensionContext | undefined;
 let awaitingTinymistJump = false;
 let selectionTimeout: NodeJS.Timeout | undefined;
 
@@ -145,6 +146,44 @@ function scanExtensionTypstFormats(qmdPath: string): TypstFormatOption[] {
     return options;
 }
 
+// The .typ that `quarto render` writes for this .qmd. Quarto names it after
+// `output-file` (format-level, else top-level) verbatim, appending ".typ" unless it
+// already ends in ".typ" (e.g. "out.pdf" -> "out.pdf.typ"); without it, <stem>.typ.
+function getTypPathForQmd(qmdPath: string): string {
+    const dir = path.dirname(qmdPath);
+    const defaultTyp = qmdPath.replace(/\.qmd$/i, '.typ');
+    try {
+        const fmMatch = fs.readFileSync(qmdPath, 'utf8').match(/^---\r?\n([\s\S]*?)\r?\n---/);
+        if (!fmMatch) return defaultTyp;
+        const fm = yaml.load(fmMatch[1]) as any;
+        const format = extensionContext ? getSelectedFormat(extensionContext, qmdPath) : 'typst';
+        const formatOptions = fm?.format && typeof fm.format === 'object' ? fm.format[format] : undefined;
+        const outputFile = formatOptions?.['output-file'] ?? fm?.['output-file'];
+        if (typeof outputFile !== 'string' || outputFile.trim() === '') return defaultTyp;
+        const name = path.basename(outputFile.trim());
+        return path.join(dir, name.toLowerCase().endsWith('.typ') ? name : `${name}.typ`);
+    } catch (e) {
+        console.error(`[qmd2typ-debug] Failed to read output-file of ${qmdPath}:`, e);
+        return defaultTyp;
+    }
+}
+
+// The .qmd a .typ was rendered from: the same-named .qmd if it renders to this .typ,
+// else any .qmd in the same folder whose output-file resolves to this .typ.
+function findQmdForTyp(typPath: string): string | undefined {
+    const sameName = typPath.replace(/\.typ$/i, '.qmd');
+    const candidates = [sameName];
+    try {
+        for (const f of fs.readdirSync(path.dirname(typPath))) {
+            const p = path.join(path.dirname(typPath), f);
+            if (f.toLowerCase().endsWith('.qmd') && p !== sameName) candidates.push(p);
+        }
+    } catch (e) {
+        return undefined;
+    }
+    return candidates.find(q => fs.existsSync(q) && path.resolve(getTypPathForQmd(q)) === path.resolve(typPath));
+}
+
 // Also surface any typst-based format already referenced in this document's
 // frontmatter or the project's _quarto.yml, even if its _extension.yml lives
 // outside the directories scanned above.
@@ -209,6 +248,7 @@ function scanTypstFormats(qmdPath: string): TypstFormatOption[] {
 }
 
 export function activate(context: vscode.ExtensionContext) {
+    extensionContext = context;
 
     // COMMAND: Manual Preview/Play
     let previewCommand = vscode.commands.registerCommand('qmd2typ.preview', async () => {
@@ -292,7 +332,7 @@ export function activate(context: vscode.ExtensionContext) {
             await executeTypstToPdf(editor.document);
         } else if (editor && editor.document.languageId === 'quarto') {
             // Optional: If triggered from a .qmd, automatically try to compile its target .typ
-            const typPath = editor.document.fileName.replace('.qmd', '.typ');
+            const typPath = getTypPathForQmd(editor.document.fileName);
             if (fs.existsSync(typPath)) {
                 const typDoc = await vscode.workspace.openTextDocument(typPath);
                 await executeTypstToPdf(typDoc);
@@ -306,18 +346,11 @@ export function activate(context: vscode.ExtensionContext) {
     async function executeJumpLogic(typEditor: vscode.TextEditor) {
         isSyncing = true;
         const fileName = typEditor.document.fileName;
-        const exactQmdPath = fileName.replace('.typ', '.qmd');
-        let targetQmdPath = exactQmdPath;
+        // Only a .typ rendered from a .qmd (same name, or via its output-file) jumps back;
+        // a standalone .typ (no associated .qmd) stays in view.
+        const targetQmdPath = findQmdForTyp(fileName);
 
-        if (!fs.existsSync(exactQmdPath) && lastActiveQmd) {
-            if (path.dirname(fileName) === path.dirname(lastActiveQmd)) {
-                targetQmdPath = lastActiveQmd;
-            } else {
-                targetQmdPath = "";
-            }
-        }
-
-        if (targetQmdPath !== "" && fs.existsSync(targetQmdPath)) {
+        if (targetQmdPath) {
             try {
                 await jumpToQmd(typEditor, targetQmdPath);
             } finally { isSyncing = false; }
@@ -498,7 +531,7 @@ async function ensureTinymistPreview(typPath: string, qmdPath: string) {
 async function executeQuartoRender(doc: vscode.TextDocument, context: vscode.ExtensionContext) {
     const qmdPath = doc.fileName;
     const workspaceFolder = path.dirname(qmdPath);
-    const typPath = qmdPath.replace('.qmd', '.typ');
+    const typPath = getTypPathForQmd(qmdPath);
     const typFileName = path.basename(typPath);
     const format = getSelectedFormat(context, qmdPath);
 
@@ -685,7 +718,7 @@ function getAllRelatedQmdFiles(mainQmdPath: string): string[] {
 
 async function syncQmdToTyp(qmdUri: vscode.Uri, cursor: vscode.Position, viewCol?: vscode.ViewColumn, returnFocus: boolean = true) {
     const qmdPath = qmdUri.fsPath;
-    const typPath = qmdPath.replace('.qmd', '.typ');
+    const typPath = getTypPathForQmd(qmdPath);
     const typUri = vscode.Uri.file(typPath);
     if (!fs.existsSync(typPath)) return;
 
@@ -772,8 +805,6 @@ async function syncQmdToTyp(qmdUri: vscode.Uri, cursor: vscode.Position, viewCol
                 preserveFocus: true,
                 preview: false
             });
-            // With the .typ tab in the .qmd's own group, showing it hides the .qmd, so always return.
-            const typInQmdGroup = typColumn === qmdColumn;
 
             typEditor.selection = new vscode.Selection(cursorPos, cursorPos);
             typEditor.revealRange(new vscode.Range(cursorPos, cursorPos), vscode.TextEditorRevealType.InCenter);
@@ -795,7 +826,9 @@ async function syncQmdToTyp(qmdUri: vscode.Uri, cursor: vscode.Position, viewCol
                 await vscode.commands.executeCommand('cursorMove', { to: 'right', by: 'character', value: 1 });
                 await vscode.commands.executeCommand('cursorMove', { to: 'left', by: 'character', value: 1 });
                 
-                if (returnFocus || typInQmdGroup) {
+                // The eye button (returnFocus = false) leaves the .typ in view, even when it
+                // shares the .qmd's group; only the post-render sync switches back to the .qmd.
+                if (returnFocus) {
                     await vscode.window.showTextDocument(qmdDoc, {
                         viewColumn: viewCol || vscode.ViewColumn.One,
                         preserveFocus: false
