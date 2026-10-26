@@ -56,5 +56,18 @@ Both extensions are installed automatically as dependencies. The extension runs 
 
 When writing academic papers or technical books, Quarto is the best tool for data and math, but the "edit-render-wait" cycle can be slow. By using Typst as a bridge, you get instant feedback. This extension removes the friction of managing two different file types, allowing you to treat your `.qmd` as the source of truth while using `.typ` as a high-speed viewing engine.
 
+## Releasing (maintainers)
+
+Releases are published by GitHub Actions ([`publish-qmd2typ-pro.yml`](https://github.com/longhaiSK/vs-code-extensions/blob/main/.github/workflows/publish-qmd2typ-pro.yml)) using Open VSX [trusted publishing](https://github.com/eclipse-openvsx/openvsx/wiki/Trusted-Publishing), so no Open VSX access token is stored anywhere.
+
+1. Bump `version` in `package.json` and add an entry to `CHANGELOG.md`.
+2. Commit and push to `main`.
+3. Run `./publish2pub.sh` from `quarto2tinymist/`. It checks that the folder is committed and in sync with GitHub, then creates and pushes the tag `qmd2typ-pro-vX.Y.Z`.
+4. Approve the run: open the workflow run in the **Actions** tab, click **Review deployments**, tick **publish** and **Approve and deploy**.
+
+The workflow checks that the tag matches `package.json`, builds the `.vsix`, attaches it to a GitHub release named after the tag, and publishes it to Open VSX. Only `qmd2typ-pro-v*` tags can use the `publish` environment, and every run needs your approval.
+
+To test a build locally before releasing, run `./install_fr_local.sh`; it packages the extension and installs it into Positron.
+
 ---
 Developed by **[Longhai Li] (https://longhaisk.github.io/)**
